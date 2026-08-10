@@ -1,0 +1,7 @@
+interface:
+  display_name: "Release Deployment"
+  short_description: "Deploy one approved and tested artifact"
+  default_prompt: "Use $release-deployment only for one explicitly authorized artifact and target; require rollback and admission evidence, and block rather than auto-create testing when evidence is missing."
+
+policy:
+  allow_implicit_invocation: true

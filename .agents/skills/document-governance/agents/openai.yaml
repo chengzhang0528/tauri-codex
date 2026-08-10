@@ -1,0 +1,7 @@
+interface:
+  display_name: "Document Governance"
+  short_description: "Keep durable rules at their sole document owner"
+  default_prompt: "Use $document-governance to separate execution type, control strength, recoverable active work, and evidence-backed uncommitted candidates while keeping each fact at one owner."
+
+policy:
+  allow_implicit_invocation: true

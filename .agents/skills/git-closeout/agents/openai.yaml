@@ -1,0 +1,7 @@
+interface:
+  display_name: "Git Closeout"
+  short_description: "Commit and push one verified work item"
+  default_prompt: "Use $git-closeout after one task result passes validation to commit and push its exact files; never treat Git push as deployment authorization."
+
+policy:
+  allow_implicit_invocation: true

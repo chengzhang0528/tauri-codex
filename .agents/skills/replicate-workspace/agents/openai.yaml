@@ -1,0 +1,7 @@
+interface:
+  display_name: "Replicate Workspace"
+  short_description: "Initialize a doc-driven control plane"
+  default_prompt: "Use $replicate-workspace to initialize or repair only the document-driven control plane while keeping the reference workspace read-only."
+
+policy:
+  allow_implicit_invocation: true

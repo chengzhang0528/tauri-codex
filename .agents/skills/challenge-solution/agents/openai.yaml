@@ -1,0 +1,7 @@
+interface:
+  display_name: "Challenge Solution"
+  short_description: "Challenge a proposal without changing or executing it"
+  default_prompt: "Use $challenge-solution to identify unsupported assumptions, scope expansion, and missing evidence in this proposal."
+
+policy:
+  allow_implicit_invocation: true

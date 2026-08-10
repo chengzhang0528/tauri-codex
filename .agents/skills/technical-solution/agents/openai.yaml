@@ -1,0 +1,7 @@
+interface:
+  display_name: "Technical Solution"
+  short_description: "Translate an approved direction into impacted technical changes"
+  default_prompt: "Use $technical-solution to produce a Development-only solution that preserves the approved direction, separates control strength from persistence, and keeps independent SystemTest and Deployment tasks separate."
+
+policy:
+  allow_implicit_invocation: true

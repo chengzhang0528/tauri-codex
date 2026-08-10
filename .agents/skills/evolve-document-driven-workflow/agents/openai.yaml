@@ -1,0 +1,7 @@
+interface:
+  display_name: "Evolve Document-Driven Workflow"
+  short_description: "Evolve governance from durable user corrections"
+  default_prompt: "Use $evolve-document-driven-workflow to propose and challenge a minimal governance improvement, then recommend the next user action without implementing it on the first request."
+
+policy:
+  allow_implicit_invocation: true

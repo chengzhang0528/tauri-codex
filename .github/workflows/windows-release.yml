@@ -1,0 +1,98 @@
+name: tauri-codex Windows release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "必须与 app/package.json 一致的版本"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tauri-codex-windows-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify Windows x64 NSIS
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: release
+        shell: pwsh
+        run: |
+          $version = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}" -replace '^v', ''
+          } else {
+            "${{ inputs.version }}"
+          }
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Invalid release version: $version"
+          }
+          $appVersion = (Get-Content -Raw app/package.json | ConvertFrom-Json).version
+          if ($version -ne $appVersion) {
+            throw "Release version $version does not match app/package.json $appVersion"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Restore build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .codex-build/cache
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: ${{ runner.os }}-windows-x64-build-${{ hashFiles('app/package-lock.json', 'app/build-versions.json', 'app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-windows-x64-build-
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-gnu
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Build release candidate
+        shell: pwsh
+        env:
+          TAURI_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: npm run build:release
+
+      - name: Verify release candidate
+        shell: pwsh
+        env:
+          TAURI_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: npm run verify:release
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-codex_${{ steps.release.outputs.version }}_windows-x64
+          path: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release asset
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/tauri-codex_${{ steps.release.outputs.version }}_x64-setup.exe

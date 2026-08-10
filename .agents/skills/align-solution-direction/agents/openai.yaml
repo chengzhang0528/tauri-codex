@@ -1,0 +1,7 @@
+interface:
+  display_name: "Solution Direction Review"
+  short_description: "Establish a stable direction contract before planning"
+  default_prompt: "Use $align-solution-direction to align outcome, per-task execution type, control strength, persistence, boundary, invariants, ownership, and completion rules without inventing a global phase or follow-up task."
+
+policy:
+  allow_implicit_invocation: true

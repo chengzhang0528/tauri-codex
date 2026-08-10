@@ -1,0 +1,20 @@
+{
+  "name": "tauri-codex-workspace",
+  "private": true,
+  "scripts": {
+    "check:docs": "node --test 文档/check-docs-human.test.mjs 文档/check-docs-phases.test.mjs 文档/check-docs-references.test.mjs && node 文档/check-docs.mjs",
+    "docs:check": "npm run check:docs",
+    "test:docs": "node --test 文档/check-docs-human.test.mjs",
+    "bootstrap": "node scripts/windows-pipeline.mjs bootstrap",
+    "build": "node scripts/windows-pipeline.mjs build",
+    "installer:build": "node scripts/windows-pipeline.mjs installer-build",
+    "installer:verify": "node scripts/windows-pipeline.mjs installer-verify",
+    "build:release": "node scripts/windows-pipeline.mjs release-build",
+    "verify:release": "node scripts/windows-pipeline.mjs release-verify",
+    "test:rust": "node scripts/windows-pipeline.mjs rust-test",
+    "test": "npm run app:build && npm run test:rust && npm run check:docs",
+    "app:build": "npm --prefix app run build",
+    "app:dev": "npm --prefix app run tauri:windows -- dev",
+    "app:bundle": "npm run installer:build"
+  }
+}

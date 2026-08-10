@@ -1,0 +1,7 @@
+{
+  "codexVersion": "0.147.0",
+  "nodeVersion": "24.19.0",
+  "nodeSha256": "f0f66c2a80c08a30a5ab5179ee9ea9e45f9b46289436a8cc87ff833b852db351",
+  "rustTarget": "x86_64-pc-windows-gnu",
+  "rustToolchain": "stable-x86_64-pc-windows-gnu"
+}
