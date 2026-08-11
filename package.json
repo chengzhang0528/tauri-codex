@@ -1,6 +1,7 @@
 {
   "name": "tauri-codex-workspace",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "scripts": {
     "check:docs": "node --test 文档/check-docs-human.test.mjs 文档/check-docs-phases.test.mjs 文档/check-docs-references.test.mjs && node 文档/check-docs.mjs",
     "docs:check": "npm run check:docs",

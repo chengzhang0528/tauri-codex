@@ -14,6 +14,7 @@ Depends On:
 
 - 产品目标、首个交付边界和产品不变量：读 [产品契约](产品契约.md)。
 - Windows x64 封装、原生 Codex TUI、并发隔离、配置与 Codex 更新方向：读 [DEC-0001](决策/DEC-0001-Windows-x64-Codex桌面封装方案.md)。
+- 社区许可、商业双重授权、第三方出处与贡献再许可：读 [DEC-0002](决策/DEC-0002-GPLv3与商业双重授权.md)。
 - 根脚本、固定构建版本、安装包验证与 GitHub Actions 触发：读 [Windows构建与发布根脚本](运行/RUN-0001-Windows构建与发布根脚本.md)。
 - 源码实现、命令与验证：读 [app 源码入口](../../../app/AGENTS.md)。
 - 涉及编码时，必须先获得用户明确授权；源码根已验证为 `app/`，后续公共契约或目录职责变化必须同步更新本入口与 `文档/WORKSPACE_STRUCTURE.md`。

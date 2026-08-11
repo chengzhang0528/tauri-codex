@@ -3,6 +3,8 @@ name = "tauri-codex"
 version = "0.1.0"
 description = "A Windows desktop wrapper for the bundled OpenAI Codex CLI"
 authors = ["tauri-codex maintainers"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chengzhang0528/tauri-codex"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
