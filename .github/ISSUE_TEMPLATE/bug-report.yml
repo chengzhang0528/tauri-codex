@@ -1,0 +1,65 @@
+name: Bug 报告
+description: 报告 Windows x64 上可重复的错误或兼容性问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有 Issue。不要提交 API Key、Token、连接串、客户数据、聊天内容或其他敏感信息。
+
+  - type: dropdown
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      options:
+        - Windows 11 x64
+        - Windows 10 22H2 x64
+        - 其他或不支持的平台
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: tauri-codex 版本或提交
+      placeholder: 0.1.0 或 Git commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: codex-version
+    attributes:
+      label: 内置 Codex 版本
+      placeholder: 设置页面显示的版本
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从启动应用开始，写出能够稳定复现问题的最短步骤。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 可以附去敏后的错误文字或截图。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索已有 Issue，并确认内容不包含密钥、个人信息或客户数据。
+          required: true
+

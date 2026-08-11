@@ -205,6 +205,7 @@ function verifyRelease() {
 function rustTest() {
   const toolchain = toolchainEnvironment();
   const manifest = path.join(appRoot, "src-tauri", "Cargo.toml");
+  run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "fmt", "--manifest-path", manifest, "--", "--check"], { env: toolchain.env });
   run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "check", "--manifest-path", manifest, "--tests"], { env: toolchain.env });
   run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "test", "--release", "--manifest-path", manifest, "--lib", "--target", config.rustTarget], { env: toolchain.env });
 }

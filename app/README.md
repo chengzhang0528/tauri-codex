@@ -1,6 +1,6 @@
 # tauri-codex app
 
-这里是 Windows x64 桌面应用源码根。Tauri/Rust 位于 `src-tauri/`，控制窗口和终端窗口前端位于 `src/`。
+这里是 Windows x64 桌面应用源码根。Tauri/Rust 位于 `src-tauri/`，唯一主窗口和内嵌终端前端位于 `src/`。
 
 完整产品边界见[产品契约](../文档/项目/项目_tauri-codex/产品契约.md)，已确认的封装方向见[DEC-0001](../文档/项目/项目_tauri-codex/决策/DEC-0001-Windows-x64-Codex桌面封装方案.md)。
 固定构建版本见 `build-versions.json`；根目录的 `bootstrap`、`build`、`installer:build` 和 `installer:verify` 是稳定交付入口。

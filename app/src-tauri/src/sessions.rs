@@ -394,6 +394,7 @@ impl SessionManager {
         terminate_session(&session)
     }
 
+    #[cfg(debug_assertions)]
     pub fn terminate_if_running(&self, id: &str) -> Result<(), String> {
         let session = self
             .sessions

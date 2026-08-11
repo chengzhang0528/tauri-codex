@@ -17,13 +17,15 @@ OpenAI and Codex are trademarks or product names of their respective owner. taur
 
 | Component | License | Source |
 |---|---|---|
-| Tauri JavaScript API and dialog/opener plugins | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri and https://github.com/tauri-apps/plugins-workspace |
+| Tauri JavaScript API and dialog plugin | Apache-2.0 OR MIT | https://github.com/tauri-apps/tauri and https://github.com/tauri-apps/plugins-workspace |
 | xterm.js and addon-fit | MIT | https://github.com/xtermjs/xterm.js |
 | Lucide icons | ISC | https://github.com/lucide-icons/lucide |
 
 ## Rust components
 
-The application directly uses Tauri, Tauri dialog/opener plugins, serde, serde_json, portable-pty, uuid, toml, toml_edit, reqwest, sha2, semver, tiny_http, and windows-rs. These projects are distributed under their upstream MIT, Apache-2.0, or dual MIT/Apache-2.0 terms. Exact versions and transitive packages are recorded in `app/src-tauri/Cargo.lock`.
+The application directly uses Tauri, the Tauri dialog plugin, serde, serde_json, portable-pty, uuid, toml, toml_edit, reqwest, sha2, semver, tiny_http, and windows-rs. These projects are distributed under their upstream MIT, Apache-2.0, or dual MIT/Apache-2.0 terms. Exact versions and transitive packages are recorded in `app/src-tauri/Cargo.lock`.
+
+Windows installers bundle this notice and the Apache License 2.0 text as application resources. The project GPL text is also included through the installer license metadata.
 
 ## License texts
 

@@ -5,7 +5,7 @@
 ## 前置条件
 
 - Windows 10 22H2 或 Windows 11 x64。
-- Node.js 16 或更高版本及 npm。
+- Node.js `^18.0.0`、`^20.0.0` 或 `>=22.0.0` 及 npm；CI 使用 Node.js `24.19.0`。
 - Rustup、`stable-x86_64-pc-windows-gnu` 和 MSYS2 UCRT64；MSYS2 需要 `windres.exe`、`gcc.exe`、`ar.exe`。
 - 首次准备依赖时可以访问 npm、crates.io 和 nodejs.org；网络资源会缓存到 `.codex-build/cache`，后续构建优先复用已校验缓存。
 
@@ -46,8 +46,8 @@ npm run installer:verify
 npm run build:release
 ```
 
-该命令只生成本机候选，不安装、不上传、不发布。已有候选可以单独运行 `npm run verify:release` 复核。修改前端、Rust 或正式文档后运行 `npm run test`，它会执行前端构建、Rust 定向检查/单测和文档门禁。
+该命令只生成本机候选，不安装、不上传、不发布。已有候选可以单独运行 `npm run verify:release` 复核。修改前端、Rust 或正式文档后运行 `npm run test`，它会执行前端构建、Rust 格式/类型检查与定向单测，以及文档门禁。修改依赖时再运行 `npm run audit:dependencies`。
 
 ## 自动触发
 
-`.github/workflows/windows-release.yml` 支持两种触发方式：推送形如 `v0.1.0` 的 tag，或在 GitHub Actions 页面手工运行并填写 `0.1.0`。workflow 会先恢复按锁文件和固定版本键控的 `.codex-build/cache`、Cargo registry/git 与 Tauri target，再执行同一套 `build:release` 和 `verify:release`；只有 tag 触发会把已验证 NSIS 上传到对应 GitHub Release，手工触发只保留 Actions artifact。Actions cache 不是发布资产。
+`.github/workflows/ci.yml` 在 Pull Request 和 `main` 推送时安装锁定依赖，执行依赖审计和 `npm test`。`.github/workflows/windows-release.yml` 支持推送形如 `v0.1.0` 的 tag，或在 GitHub Actions 页面手工运行并填写 `0.1.0`；它恢复构建缓存后先执行同一测试门禁，再运行 `build:release` 和 `verify:release`。只有 tag 触发会把已验证 NSIS 上传到对应 GitHub Release，手工触发只保留 Actions artifact。Actions cache 不是发布资产。

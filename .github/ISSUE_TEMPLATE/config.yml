@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞报告
+    url: https://github.com/chengzhang0528/tauri-codex/security/policy
+    about: 不要公开漏洞细节，请先阅读安全政策。
+

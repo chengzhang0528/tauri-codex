@@ -74,7 +74,6 @@ pub fn run() {
     let exit_sessions = state.sessions.clone();
     tauri::Builder::default()
         .manage(state)
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             runtime::check_system_node().map_err(std::io::Error::other)?;

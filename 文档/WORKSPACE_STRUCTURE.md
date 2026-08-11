@@ -4,7 +4,7 @@ Status: Active
 Kind: StructureContract
 Scope: tauri-codex / 目录与知识放置
 Owner: 项目维护者
-Updated: 2026-08-09
+Updated: 2026-08-11
 Depends On:
 - ../AGENTS.md
 
@@ -15,6 +15,7 @@ Depends On:
 | 路径 | 当前职责 | 不放置 |
 |---|---|---|
 | `.agents/skills/` | Codex 自动发现的仓库级协作方法 | 单次任务过程和产品事实 |
+| `.github/` | GitHub CI、发布自动化与公开协作模板 | 产品事实、密钥和构建生成物 |
 | `LICENSES/` | 随项目分发的第三方标准许可证原文 | 项目自有代码许可证、商业合同和产品事实 |
 | `文档/` | 任务、治理、产品契约、当前设计、决策、运行与活动推进 | 源码镜像、聊天过程、日志和生成物 |
 | `app/` | 已验证的 Tauri 桌面应用源码、构建配置和定向测试 | 产品契约副本、真实密钥、运行日志和发布生成物 |

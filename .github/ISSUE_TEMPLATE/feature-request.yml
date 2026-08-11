@@ -1,0 +1,38 @@
+name: 功能建议
+description: 建议新能力、平台支持或兼容性范围
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Windows ARM64、更早的 Windows、macOS 和 Linux 当前不受支持，但可以在这里说明真实使用场景。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与问题
+      description: 说明谁在什么情况下遇到什么限制，不要只写方案名称。
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 描述用户最终应能完成什么事情。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已尝试的替代方案
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索已有 Issue，并确认内容不包含密钥、个人信息或客户数据。
+          required: true
+

@@ -64,12 +64,23 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-gnu
           targets: x86_64-pc-windows-gnu
+          components: rustfmt
 
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
           install: mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Install locked frontend dependencies
+        shell: pwsh
+        run: npm ci --prefix app --no-audit --no-fund
+
+      - name: Verify source and dependencies
+        shell: pwsh
+        run: |
+          npm run audit:dependencies
+          npm test
 
       - name: Build release candidate
         shell: pwsh

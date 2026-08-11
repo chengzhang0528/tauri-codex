@@ -2,7 +2,11 @@
   "name": "tauri-codex-workspace",
   "private": true,
   "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": "^18.0.0 || ^20.0.0 || >=22.0.0"
+  },
   "scripts": {
+    "audit:dependencies": "npm audit --prefix app --audit-level=high",
     "check:docs": "node --test 文档/check-docs-human.test.mjs 文档/check-docs-phases.test.mjs 文档/check-docs-references.test.mjs && node 文档/check-docs.mjs",
     "docs:check": "npm run check:docs",
     "test:docs": "node --test 文档/check-docs-human.test.mjs",
