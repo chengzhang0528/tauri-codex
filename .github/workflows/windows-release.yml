@@ -76,9 +76,9 @@ jobs:
         shell: msys2 {0}
         run: echo "TAURI_MINGW_BIN=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_ENV"
 
-      - name: Install locked frontend dependencies
+      - name: Bootstrap locked build inputs
         shell: pwsh
-        run: npm ci --prefix app --no-audit --no-fund
+        run: npm run bootstrap
 
       - name: Verify source and dependencies
         shell: pwsh
