@@ -6,15 +6,17 @@ tauri-codex 是独立的社区项目，不是 OpenAI 官方产品，也不代表
 
 ## 当前可用范围
 
-当前版本为 `0.1.0` 源码预览，仓库尚未发布可下载的 GitHub Release。Windows x64 用户可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 安装包。
+当前公开版本为 [`v0.1.0`](https://github.com/chengzhang0528/tauri-codex/releases/tag/v0.1.0)。Windows x64 用户可以从 Release 页面下载 `tauri-codex_0.1.0_x64-setup.exe`，也可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 安装包。
 
 - 支持 Windows 10 22H2 x64 和 Windows 11 x64。
 - 不支持更早的 Windows、Windows ARM64、macOS 或 Linux；这些场景可以按[支持说明](SUPPORT.md)提交功能建议。
+- 应用可以检查 GitHub Releases 和内置 Codex 更新；下载、安装或应用更新均由用户明确点击触发，活动会话不会被自动中断。
 - Bug、兼容性问题和使用反馈通过 GitHub Issues 跟踪，提交入口和必要信息见[支持说明](SUPPORT.md)。
 - 安全漏洞不要公开披露，按[安全政策](SECURITY.md)报告。
 
 ## 项目入口
 
+- [下载最新 Windows x64 安装包](https://github.com/chengzhang0528/tauri-codex/releases/latest)
 - [构建 Windows 桌面应用](人类-文档/开发/构建Windows桌面应用.md)
 - [全部人类文档](人类-文档/README.md)
 - [产品契约](文档/项目/项目_tauri-codex/产品契约.md)

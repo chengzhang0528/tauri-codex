@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { validateHumanDocumentation } from "./check-docs-human.mjs";
-import { resolveDocumentReference } from "./check-docs-references.mjs";
+import {
+  containsMachineSpecificWorkspacePath,
+  resolveDocumentReference,
+} from "./check-docs-references.mjs";
 import {
   ACTIVITY_KINDS,
   PLAN_KINDS,
@@ -521,7 +524,7 @@ for (const file of files.filter((item) => {
     || label.startsWith(".agents/skills/");
 })) {
   const text = texts.get(file);
-  if (/[A-Za-z]:[\\/][^\s`]+/.test(text)) {
+  if (containsMachineSpecificWorkspacePath(text)) {
     errors.push(`${relative(file)}: contains a machine-specific workspace path`);
   }
   if (/Password=(?!<|\$\{|%|\$env:|__)[^;\s"'`]+/i.test(text)) {

@@ -1,6 +1,6 @@
 # tauri-codex 安全政策
 
-安全修复面向 `main` 和最新公开版本；旧版本不保证继续接收修复。项目尚无公开 Release 时，以 `main` 的源码为唯一维护基线。
+安全修复面向 `main` 和最新公开版本；旧版本不保证继续接收修复。
 
 ## 私下报告漏洞
 
@@ -17,4 +17,3 @@ https://github.com/chengzhang0528/tauri-codex/security/advisories/new
 - 已确认的缓解方式，以及是否已公开披露给其他项目。
 
 项目不会承诺固定响应时限。OpenAI Codex、Node.js、Tauri 或其他第三方组件的漏洞也应报告给对应上游；若 tauri-codex 的组合或分发方式受到影响，可以同时通知本项目。
-

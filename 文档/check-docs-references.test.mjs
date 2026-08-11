@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveDocumentReference } from "./check-docs-references.mjs";
+import {
+  containsMachineSpecificWorkspacePath,
+  resolveDocumentReference,
+} from "./check-docs-references.mjs";
+
+test("distinguishes Windows workspace paths from HTTPS links", () => {
+  assert.equal(containsMachineSpecificWorkspacePath("Use D:\\github.com\\project"), true);
+  assert.equal(containsMachineSpecificWorkspacePath("See https://github.com/org/project"), false);
+});
 
 async function createFixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "check-docs-references-"));

@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export function containsMachineSpecificWorkspacePath(text) {
+  return /(?<![A-Za-z])[A-Za-z]:[\\/][^\s`]+/.test(text);
+}
+
 export function resolveDocumentReference({ root, docsRoot, source, raw, exists = fs.existsSync }) {
   let value = raw.trim().replace(/^`|`$/g, "");
   const link = value.match(/^\[[^\]]*\]\(([^)]+)\)$/);
