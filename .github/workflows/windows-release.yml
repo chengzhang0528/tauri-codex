@@ -72,6 +72,10 @@ jobs:
           update: true
           install: mingw-w64-ucrt-x86_64-toolchain
 
+      - name: Expose MSYS2 UCRT64 toolchain
+        shell: msys2 {0}
+        run: echo "TAURI_MINGW_BIN=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_ENV"
+
       - name: Install locked frontend dependencies
         shell: pwsh
         run: npm ci --prefix app --no-audit --no-fund

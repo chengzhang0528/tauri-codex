@@ -27,4 +27,4 @@ Depends On:
 
 兼容入口 `app:bundle` 等价于 `installer:build`；开发入口仍是 `app:dev`。GitHub Actions 的 `ci.yml` 在 Pull Request、`main` 推送和手工触发时执行锁定依赖安装、依赖审计和 `npm test`。`windows-release.yml` 在 `vX.Y.Z` tag 或手工触发时先执行同一源码门禁，再执行 `build:release` 和 `verify:release`；tag 触发才把已验证安装包上传到同名 GitHub Release，本地脚本不承担发布。
 
-重试时直接重复同一个脚本即可。固定版本不匹配、工具链缺失、资源版本不一致或校验失败时脚本立即停止；网络恢复后，已验证缓存会避免重复下载，不覆盖已存在的不同候选。GitHub Actions 通过 `actions/cache@v4` 恢复 `.codex-build/cache`、Cargo registry/git 和 Tauri target，缓存键包含 `app/package-lock.json`、`app/build-versions.json` 与 `Cargo.lock`；这些缓存不是发布资产。
+重试时直接重复同一个脚本即可。固定版本不匹配、工具链缺失、资源版本不一致或校验失败时脚本立即停止；网络恢复后，已验证缓存会避免重复下载，不覆盖已存在的不同候选。setup-msys2 的安装根由 Action 动态决定，CI 与 Release Workflow 都在其 `msys2 {0}` shell 中把 `/ucrt64/bin` 转为 Windows 路径并通过 `TAURI_MINGW_BIN` 交给根脚本，不依赖 runner 临时目录。GitHub Actions 通过 `actions/cache@v4` 恢复 `.codex-build/cache`、Cargo registry/git 和 Tauri target，缓存键包含 `app/package-lock.json`、`app/build-versions.json` 与 `Cargo.lock`；这些缓存不是发布资产。
