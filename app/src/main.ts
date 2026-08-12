@@ -292,9 +292,10 @@ async function renderControl(): Promise<void> {
     </main>`;
 
   let snapshot = await call<Snapshot>("get_snapshot");
-  let activeView: ControlView = isControlView(window.localStorage.getItem("control-view"))
-    ? window.localStorage.getItem("control-view") as ControlView
-    : "sessions";
+  // The product contract defines sessions as the startup view. Navigation state
+  // is intentionally transient so a previous visit to settings cannot produce
+  // an unexpected or incomplete first screen after relaunch.
+  let activeView: ControlView = "sessions";
   let updateState: UpdateState = { checking: false };
   let draftWorkdir = normalizeWorkdir(window.localStorage.getItem("last-workdir") ?? "");
   let recentWorkdirs = loadWorkdirs(draftWorkdir);
@@ -698,7 +699,6 @@ async function renderControl(): Promise<void> {
   };
   const renderView = (view: ControlView): void => {
     activeView = view;
-    window.localStorage.setItem("control-view", view);
     document.querySelectorAll<HTMLButtonElement>(".nav-item").forEach((button) => {
       button.classList.toggle("is-active", button.dataset.view === view);
       button.setAttribute("aria-current", button.dataset.view === view ? "page" : "false");
