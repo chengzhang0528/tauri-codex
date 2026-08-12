@@ -70,7 +70,7 @@ type CodexUpdateInfo = { current_version: string | null; latest_version: string;
 type UpdateResult = { version: string; path: string; kind: string };
 type ControlView = "sessions" | "api" | "settings";
 type StatusTone = "neutral" | "error" | "success";
-type UpdateState = { release?: ReleaseInfo; codex?: CodexUpdateInfo; checking: boolean };
+type UpdateState = { release?: ReleaseInfo; codex?: CodexUpdateInfo; checking: boolean; checkedAt?: number };
 
 const iconSet = {
   ArrowLeft,
@@ -665,7 +665,7 @@ async function renderControl(): Promise<void> {
         call<ReleaseInfo>("check_app_update"),
         call<CodexUpdateInfo>("check_codex_update"),
       ]);
-      updateState = { release, codex, checking: true };
+      updateState = { release, codex, checking: true, checkedAt: Date.now() };
       const staging: Promise<unknown>[] = [];
       if (release.update_available) staging.push(call("stage_app_update"));
       if (codex.update_available) {
@@ -727,7 +727,7 @@ async function renderControl(): Promise<void> {
     } else {
       title.textContent = "设置";
       meta.textContent = `应用 ${snapshot.app_version}`;
-      actions.innerHTML = '<button class="button button-secondary" id="check-update"><i data-lucide="refresh-cw"></i><span>检查更新</span></button>';
+      actions.innerHTML = "";
       renderSettingsView(snapshot, updateState);
       bindSettingsView(snapshot, refreshSnapshot, checkUpdates);
     }
@@ -1026,7 +1026,7 @@ function renderSettingsView(snapshot: Snapshot, updateState: UpdateState): void 
         <div class="advanced-body"><textarea id="config-editor" spellcheck="false">${escapeHtml(snapshot.config_toml)}</textarea><div class="advanced-actions"><button class="button button-secondary" id="save-config" type="button"><i data-lucide="file-text"></i><span>保存高级配置</span></button></div></div>
       </details>
       <section class="settings-section">
-        <div class="section-heading settings-heading"><div><h2>更新</h2></div></div>
+        <div class="section-heading settings-heading"><div><h2>更新</h2></div><button class="button button-secondary" id="check-update" type="button"></button></div>
         <div class="setting-row"><div class="setting-copy"><strong>桌面应用</strong><small id="desktop-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.app_version)}</span><button class="button button-secondary update-button" id="desktop-update-action" type="button"></button></div>
         <div class="setting-row"><div class="setting-copy"><strong>内置 Codex</strong><small id="codex-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.codex_version ?? "未安装")}</span><button class="button button-secondary update-button" id="codex-update-action" type="button"></button></div>
       </section>
@@ -1126,11 +1126,15 @@ function bindSettingsView(
 }
 
 function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
+  const checkButton = document.querySelector<HTMLButtonElement>("#check-update");
   const desktopSummary = document.querySelector<HTMLElement>("#desktop-update-summary");
   const codexSummary = document.querySelector<HTMLElement>("#codex-update-summary");
   const desktopButton = document.querySelector<HTMLButtonElement>("#desktop-update-action");
   const codexButton = document.querySelector<HTMLButtonElement>("#codex-update-action");
-  if (!desktopSummary || !codexSummary || !desktopButton || !codexButton) return;
+  if (!checkButton || !desktopSummary || !codexSummary || !desktopButton || !codexButton) return;
+
+  setButtonContent(checkButton, updateState.checking ? "正在检查" : updateState.checkedAt ? "再次检查" : "检查更新", "refresh-cw");
+  checkButton.disabled = updateState.checking;
 
   const release = updateState.release;
   const asset = chooseDesktopAsset(release?.assets ?? []);
