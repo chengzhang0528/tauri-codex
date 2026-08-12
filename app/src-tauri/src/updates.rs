@@ -29,15 +29,20 @@ pub fn check_release() -> Result<ReleaseInfo, String> {
         "https://api.github.com/repos/{}/releases/latest",
         paths::GITHUB_REPOSITORY
     );
-    let response = client.get(url).send().map_err(|error| error.to_string())?;
+    let response = match client.get(url).send() {
+        Ok(response) => response,
+        Err(github_error) => return check_release_from_oss(github_error.to_string()),
+    };
     if response.status() == StatusCode::NOT_FOUND {
-        return Ok(no_release_info());
+        return check_release_from_oss("GitHub latest Release 返回 404".to_string());
     }
-    let response: GithubReleaseResponse = response
-        .error_for_status()
-        .map_err(|error| error.to_string())?
-        .json()
-        .map_err(|error| error.to_string())?;
+    let response: GithubReleaseResponse = match response.error_for_status() {
+        Ok(response) => match response.json() {
+            Ok(release) => release,
+            Err(error) => return check_release_from_oss(error.to_string()),
+        },
+        Err(error) => return check_release_from_oss(error.to_string()),
+    };
     let update_available = is_newer_version(&response.tag_name, env!("CARGO_PKG_VERSION"))?
         || crate::thin::installer_update_available().unwrap_or(false);
     Ok(ReleaseInfo {
@@ -59,15 +64,22 @@ pub fn check_release() -> Result<ReleaseInfo, String> {
     })
 }
 
-fn no_release_info() -> ReleaseInfo {
-    ReleaseInfo {
-        tag_name: String::new(),
-        name: String::new(),
-        html_url: String::new(),
+fn check_release_from_oss(github_error: String) -> Result<ReleaseInfo, String> {
+    let version = crate::thin::latest_release_version()
+        .map_err(|oss_error| format!("GitHub Release 不可用：{github_error}; {oss_error}"))?;
+    let tag_name = format!("v{version}");
+    Ok(ReleaseInfo {
+        update_available: is_newer_version(&tag_name, env!("CARGO_PKG_VERSION"))?
+            || crate::thin::installer_update_available().unwrap_or(false),
+        tag_name,
+        name: format!("tauri-codex v{version}"),
+        html_url: format!(
+            "https://github.com/{}/releases/tag/v{version}",
+            paths::GITHUB_REPOSITORY
+        ),
         published_at: None,
-        update_available: false,
         assets: Vec::new(),
-    }
+    })
 }
 
 #[allow(dead_code)]
@@ -492,7 +504,7 @@ fn normalize_digest(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_version, no_release_info, verify_download};
+    use super::{is_newer_version, verify_download};
     use sha2::{Digest, Sha256};
     use std::fs;
 
@@ -501,14 +513,6 @@ mod tests {
         assert!(is_newer_version("v0.148.0", "0.147.0").unwrap());
         assert!(!is_newer_version("v0.147.0", "0.147.0").unwrap());
         assert!(!is_newer_version("v0.146.0", "0.147.0").unwrap());
-    }
-
-    #[test]
-    fn missing_github_release_is_a_normal_empty_result() {
-        let release = no_release_info();
-        assert!(release.tag_name.is_empty());
-        assert!(!release.update_available);
-        assert!(release.assets.is_empty());
     }
 
     #[test]

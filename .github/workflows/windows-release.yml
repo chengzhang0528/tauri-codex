@@ -19,10 +19,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  oss-preflight:
+    name: Verify OSS publisher admission
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    environment: oss-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Prove project-scoped write and anonymous readback
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          npm run publish:release:oss -- preflight $version
+
   build:
     name: Build and verify Windows x64 NSIS
     runs-on: windows-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,9 +131,81 @@ jobs:
           path: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/*
           if-no-files-found: error
 
-      - name: Publish GitHub Release asset
-        if: github.ref_type == 'tag'
+  oss-stage:
+    name: Stage verified OSS immutable closure
+    if: github.ref_type == 'tag'
+    needs: [oss-preflight, build]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: oss-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Download exact Windows x64 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
+          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
+
+      - name: Upload and read back immutable objects without moving Bootstrap
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: npm run publish:release:oss -- stage ${{ needs.build.outputs.version }}
+
+  github-release:
+    name: Publish GitHub Release assets
+    if: github.ref_type == 'tag'
+    needs: [build, oss-stage]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download exact Windows x64 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
+          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
+
+      - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/**/*
+          files: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64/**/*
+
+  oss-commit:
+    name: Verify both origins and commit OSS Bootstrap
+    if: github.ref_type == 'tag'
+    needs: [build, github-release]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: oss-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Download exact Windows x64 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
+          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
+
+      - name: Verify GitHub and OSS bytes, then commit Bootstrap last
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: npm run publish:release:oss -- commit ${{ needs.build.outputs.version }}

@@ -5,7 +5,7 @@ Kind: Decision
 Decision ID: DEC-0001
 Scope: tauri-codex / 首个交付技术方向
 Owner: 项目维护者
-Updated: 2026-08-10
+Updated: 2026-08-13
 Depends On:
 - ../产品契约.md
 
@@ -35,7 +35,7 @@ Depends On:
 | 输出压力 | Session Host 和对应嵌入 xterm 之间使用有界队列与逐批渲染确认；过载只影响对应会话 | Tauri Rust runtime 与 xterm | 防止终端输出洪泛 |
 | 模型实例 | 每个 Responses API 实例保存名称、URL、API Key 和唯一默认标记，并生成不含 model 的独立 `<profile>.config.toml` | 配置层与 Codex | 用户决定与 Codex 0.134+ 配置规则 |
 | 配置隔离 | 所有 Codex 进程显式使用同一个应用专属 `CODEX_HOME` | Tauri Rust runtime | 用户决定与官方能力 |
-| 更新 | GitHub Releases 提供不可变 Installer、manifest 与组件资产；Launcher 负责探测、下载、校验、staging、激活与 previous 保留 | Launcher/Updater | 用户决定 |
+| 更新 | GitHub Releases 提供公开版本页和不可变资产，固定项目 OSS 保存同字节发布闭包作为备用读取源；Launcher 负责探测、下载、校验、staging、激活与 previous 保留 | Launcher/Updater | 用户决定与 Here 交付边界 |
 
 ## 运行结构
 
@@ -63,7 +63,7 @@ flowchart LR
 
 ### NSIS Setup 与 Launcher
 
-- NSIS 只安装稳定 Launcher、图标、Bootstrap 和许可证；不携带 Manager、Codex 或 Node payload。
+- NSIS 只安装稳定 Launcher、图标、Bootstrap 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只接受项目 GitHub Release 与固定 `shared-public-assets/project-tauri-codex` OSS 根，任一来源都必须通过同一大小和 SHA-256。
 - Launcher 读取固定 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定源下载，校验大小/SHA-256、解包并 doctor 通过后才进入 staging。
 - 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理；准备完成后启动 Tauri Manager。
 
@@ -126,6 +126,6 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 ## 发布与官方文档获取边界
 
-- 桌面发布只需要在项目 GitHub Releases 放置 Windows x64 安装资产。
+- 桌面发布在任何公开 Release 出现前先验证 `oss-release` 环境、凭据名称、项目 OSS 写入和匿名回读；冻结候选后先将同一不可变闭包上传并完整回读到项目 OSS 前缀，再公开 GitHub Release，复核两个公开源后最后提交 OSS Bootstrap。前置失败不得公开 Release，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
 - 官方 Codex 文档查询使用工作区 skill [official-codex-docs](../../../../.agents/skills/official-codex-docs/SKILL.md)，保留 `developers.openai.com` 官方 URL；Windows helper 依次使用显式 `CODEX_DOCS_PROXY`、`localhost:1080`、`127.0.0.1:1080`，最后直连 HTTPS。
 - 该代理只用于开发资料抓取，不注入应用、Codex、更新器或用户会话。

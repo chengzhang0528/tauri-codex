@@ -28,6 +28,9 @@ const bootstrapResource = path.join(appRoot, "src-tauri", "resources", "bootstra
 const managerSource = path.join(targetReleaseRoot, "tauri-codex-manager.exe");
 const releaseAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/v${appVersion}/${name}`;
 const installerAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/${installerReleaseTag}/${name}`;
+const releaseObjectKey = (name) => `releases/${appVersion}/windows-x64/${name}`;
+const componentObjectKey = (name) => `releases/${appVersion}/windows-x64/components/${name}`;
+const installerObjectKey = (name) => `installers/${installerVersion}/windows-x64/${name}`;
 
 if (process.env.TAURI_RELEASE_VERSION && process.env.TAURI_RELEASE_VERSION !== appVersion) {
   fail(`TAURI_RELEASE_VERSION ${process.env.TAURI_RELEASE_VERSION} 与 app/package.json ${appVersion} 不一致。`);
@@ -124,9 +127,9 @@ function artifactRecord(filePath) {
   };
 }
 
-function publicArtifact(filePath) {
+function publicArtifact(filePath, objectKey) {
   const artifact = artifactRecord(filePath);
-  return { url: releaseAssetUrl(path.basename(filePath)), size: artifact.size, sha256: artifact.sha256 };
+  return { url: releaseAssetUrl(path.basename(filePath)), objectKey, size: artifact.size, sha256: artifact.sha256 };
 }
 
 function runQuiet(command, args, options = {}) {
@@ -162,13 +165,13 @@ function prepareComponentAssets() {
     platform: "windows",
     architecture: "x86_64",
     components: [
-      { id: "manager", version: appVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(managerArchive) },
-      { id: "codex", version: config.codexVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(codexArchive) },
-      { id: "node", version: config.nodeVersion, kind: "system-msi", required: true, archive: "msi", artifact: publicArtifact(nodeAsset) },
+      { id: "manager", version: appVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(managerArchive, componentObjectKey(path.basename(managerArchive))) },
+      { id: "codex", version: config.codexVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(codexArchive, componentObjectKey(path.basename(codexArchive))) },
+      { id: "node", version: config.nodeVersion, kind: "system-msi", required: true, archive: "msi", artifact: publicArtifact(nodeAsset, componentObjectKey(path.basename(nodeAsset))) },
     ],
   };
   writeFileSync(releaseManifest, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  const manifestArtifact = publicArtifact(releaseManifest);
+  const manifestArtifact = publicArtifact(releaseManifest, releaseObjectKey("manifest.json"));
   return { managerArchive, codexArchive, nodeAsset, manifest: releaseManifest, manifestArtifact };
 }
 
@@ -180,7 +183,12 @@ function writeBootstrap(manifestArtifact, installerArtifact) {
     architecture: "x86_64",
     installer: {
       version: installerVersion,
-      artifact: { url: installerAssetUrl(path.basename(installerOutput)), size: installerArtifact.size, sha256: installerArtifact.sha256 },
+      artifact: {
+        url: installerAssetUrl(path.basename(installerOutput)),
+        objectKey: installerObjectKey(path.basename(installerOutput)),
+        size: installerArtifact.size,
+        sha256: installerArtifact.sha256,
+      },
     },
     release: { version: appVersion, manifest: manifestArtifact },
   };
@@ -235,7 +243,7 @@ function readPublishedInstaller() {
   if (!asset || !Number.isSafeInteger(asset.size) || asset.size <= 0 || !/^[a-f0-9]{64}$/.test(digest ?? "")) {
     fail(`GitHub Release ${installerReleaseTag} 缺少可验证的稳定 Installer ${name}`);
   }
-  return { url: asset.browser_download_url, size: asset.size, sha256: digest };
+  return { url: asset.browser_download_url, objectKey: installerObjectKey(name), size: asset.size, sha256: digest };
 }
 
 function bootstrap() {
@@ -327,6 +335,8 @@ function verifyReleaseCandidate() {
   artifact ??= bootstrap.installer?.artifact;
   if (bootstrap.release?.version !== appVersion || bootstrap.installer?.version !== installerVersion ||
       bootstrap.installer?.artifact?.size !== artifact.size || bootstrap.installer?.artifact?.sha256 !== artifact.sha256 ||
+      bootstrap.installer?.artifact?.objectKey !== installerObjectKey(path.basename(installerOutput)) ||
+      bootstrap.release?.manifest?.objectKey !== releaseObjectKey("manifest.json") ||
       thinManifest.version !== appVersion || thinManifest.components?.length !== 3) {
     fail("薄安装器 Bootstrap 或组件清单版本不一致。");
   }
@@ -335,7 +345,8 @@ function verifyReleaseCandidate() {
     const local = path.join(componentRoot, name);
     if (!existsSync(local)) fail(`组件资产缺失：${local}`);
     const measured = artifactRecord(local);
-    if (measured.size !== component.artifact.size || measured.sha256 !== component.artifact.sha256) fail(`组件清单摘要不一致：${name}`);
+    if (measured.size !== component.artifact.size || measured.sha256 !== component.artifact.sha256 ||
+        component.artifact.objectKey !== componentObjectKey(name)) fail(`组件清单摘要或 OSS object key 不一致：${name}`);
   }
   console.log(JSON.stringify({ verified: true, installer: artifact, installerReused: !buildingInstaller, thinInstaller: true, components: thinManifest.components.map((component) => component.id), codexVersion: config.codexVersion, nodeVersion: config.nodeVersion }, null, 2));
 }

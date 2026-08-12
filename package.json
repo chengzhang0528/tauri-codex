@@ -16,9 +16,10 @@
     "installer:verify": "node scripts/windows-pipeline.mjs installer-verify",
     "build:release": "node scripts/windows-pipeline.mjs release-build",
     "verify:release": "node scripts/windows-pipeline.mjs release-verify",
+    "publish:release:oss": "node scripts/oss-release.mjs",
     "release:patch": "node scripts/release.mjs patch",
     "test:rust": "node scripts/windows-pipeline.mjs rust-test",
-    "test": "npm run app:build && npm run test:rust && node --test scripts/release.test.mjs && npm run check:docs",
+    "test": "npm run app:build && npm run test:rust && node --test scripts/*.test.mjs && npm run check:docs",
     "app:build": "npm --prefix app run build",
     "app:dev": "npm --prefix app run tauri:windows -- dev",
     "app:bundle": "npm run installer:build"

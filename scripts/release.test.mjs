@@ -28,8 +28,8 @@ test("desktop packaging keeps the stable installer independent and thin", () => 
   assert.equal(lock.version, app.version);
   assert.equal(lock.packages[""].version, app.version);
   assert.match(cargo, new RegExp(`^version = "${app.version.replaceAll(".", "\\.")}"$`, "m"));
-  assert.equal(installer.installerVersion, "1.0.2");
-  assert.equal(installer.releaseTag, "v0.1.6");
+  assert.equal(installer.installerVersion, "1.0.3");
+  assert.equal(installer.releaseTag, "v0.1.8");
   assert.equal(tauri.version, installer.installerVersion);
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
@@ -62,4 +62,18 @@ test("split launcher and manager are explicit build outputs", () => {
   assert.match(managerMain, /not\(feature = "custom-protocol"\)/);
   assert.match(managerMain, /compile_error!/);
   assert.match(pipeline, /writeFileSync\(bootstrapResource[\s\S]*tauri",\s*"--",\s*"bundle"/);
+});
+
+test("release admits and stages OSS before GitHub publication, then commits Bootstrap last", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/windows-release.yml", import.meta.url), "utf8");
+  const pipeline = readFileSync(new URL("./windows-pipeline.mjs", import.meta.url), "utf8");
+  assert.match(workflow, /oss-preflight:[\s\S]*environment: oss-release[\s\S]*publish:release:oss -- preflight/);
+  assert.match(workflow, /oss-stage:[\s\S]*needs: \[oss-preflight, build\][\s\S]*publish:release:oss -- stage/);
+  assert.match(workflow, /github-release:[\s\S]*needs: \[build, oss-stage\][\s\S]*Publish GitHub Release assets/);
+  assert.match(workflow, /oss-commit:[\s\S]*needs: \[build, github-release\][\s\S]*publish:release:oss -- commit/);
+  assert.match(workflow, /environment: oss-release/);
+  assert.match(workflow, /ALIYUN_OSS_ACCESS_KEY_ID: \$\{\{ secrets\.ALIYUN_OSS_ACCESS_KEY_ID \}\}/);
+  assert.match(pipeline, /objectKey/);
+  assert.match(pipeline, /releases\/\$\{appVersion\}\/windows-x64\/components/);
+  assert.match(pipeline, /installers\/\$\{installerVersion\}\/windows-x64/);
 });

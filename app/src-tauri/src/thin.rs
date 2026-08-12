@@ -17,6 +17,10 @@ use zip::ZipArchive;
 const BOOTSTRAP_FILE: &str = "bootstrap.json";
 const LATEST_RELEASE_API: &str =
     "https://api.github.com/repos/chengzhang0528/tauri-codex/releases/latest";
+const OSS_BASE_URL: &str =
+    "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
+const OSS_BOOTSTRAP_URL: &str =
+    "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/bootstrap/windows-x64.json";
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -75,6 +79,8 @@ pub struct ComponentArtifact {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Artifact {
     pub url: String,
+    #[serde(default, rename = "objectKey")]
+    pub object_key: Option<String>,
     pub size: u64,
     pub sha256: String,
 }
@@ -157,6 +163,14 @@ pub fn launch_current_if_ready() -> Result<bool, String> {
     let root = launcher_data_root()?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     if let Some(release) = current_release_path(&root)? {
+        let current = current_release_version(&root)?
+            .ok_or_else(|| "当前 release 状态缺少版本".to_string())?;
+        if let Ok(bootstrap) = read_installed_bootstrap() {
+            validate_bootstrap(&bootstrap)?;
+            if should_prepare_installed_release(&current, &bootstrap.release.version)? {
+                return Ok(false);
+            }
+        }
         if doctor_manager(&release.join("manager")).is_err()
             || doctor_codex(&release.join("codex")).is_err()
         {
@@ -166,6 +180,12 @@ pub fn launch_current_if_ready() -> Result<bool, String> {
         return Ok(true);
     }
     Ok(false)
+}
+
+fn should_prepare_installed_release(current: &str, bundled: &str) -> Result<bool, String> {
+    let current = semver::Version::parse(current).map_err(|error| error.to_string())?;
+    let bundled = semver::Version::parse(bundled).map_err(|error| error.to_string())?;
+    Ok(bundled > current)
 }
 
 #[tauri::command]
@@ -319,15 +339,15 @@ pub fn launch_release_activation(target: &str) -> Result<(), String> {
 pub fn stage_latest_release() -> Result<String, String> {
     let root = launcher_data_root()?;
     let bootstrap = resolve_bootstrap()?;
-    let manifest = load_manifest(&bootstrap)?;
-    if current_release_version(&root)?.as_deref() != Some(manifest.version.as_str()) {
-        stage_release(&root, &manifest, &mut |_, _, _, _| {})?;
-        return Ok(manifest.version);
-    }
     if let Some(installer) = &bootstrap.installer {
         if installer_is_newer(&installer.version)? {
             return stage_installer(&root, installer);
         }
+    }
+    let manifest = load_manifest(&bootstrap)?;
+    if current_release_version(&root)?.as_deref() != Some(manifest.version.as_str()) {
+        stage_release(&root, &manifest, &mut |_, _, _, _| {})?;
+        return Ok(manifest.version);
     }
     Err("当前桌面应用和 Launcher 已是最新版本".to_string())
 }
@@ -338,6 +358,10 @@ pub fn installer_update_available() -> Result<bool, String> {
         Some(installer) => installer_is_newer(&installer.version),
         None => Ok(false),
     }
+}
+
+pub fn latest_release_version() -> Result<String, String> {
+    resolve_bootstrap().map(|bootstrap| bootstrap.release.version)
 }
 
 fn stage_installer(root: &Path, installer: &BootstrapInstaller) -> Result<String, String> {
@@ -432,6 +456,18 @@ fn resolve_bootstrap() -> Result<Bootstrap, String> {
 }
 
 fn read_latest_bootstrap() -> Result<Bootstrap, String> {
+    match read_github_bootstrap().and_then(|bootstrap| {
+        validate_bootstrap(&bootstrap)?;
+        Ok(bootstrap)
+    }) {
+        Ok(bootstrap) => Ok(bootstrap),
+        Err(github_error) => read_oss_bootstrap().map_err(|oss_error| {
+            format!("GitHub Release 不可用：{github_error}; OSS 备用源不可用：{oss_error}")
+        }),
+    }
+}
+
+fn read_github_bootstrap() -> Result<Bootstrap, String> {
     let client = http_client()?;
     let release: GithubRelease = client
         .get(LATEST_RELEASE_API)
@@ -451,10 +487,28 @@ fn read_latest_bootstrap() -> Result<Bootstrap, String> {
         .ok_or_else(|| "GitHub bootstrap 资产缺少 SHA-256".to_string())?;
     let artifact = Artifact {
         url: asset.browser_download_url,
+        object_key: None,
         size: asset.size,
         sha256: digest,
     };
     read_json_artifact(&artifact, MAX_MANIFEST_BYTES, "Bootstrap")
+}
+
+fn read_oss_bootstrap() -> Result<Bootstrap, String> {
+    let response = http_client()?
+        .get(OSS_BOOTSTRAP_URL)
+        .send()
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?;
+    let bytes = response.bytes().map_err(|error| error.to_string())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("OSS Bootstrap 大小不在允许范围内".to_string());
+    }
+    let bootstrap: Bootstrap = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("OSS Bootstrap 无法解析：{error}"))?;
+    validate_bootstrap(&bootstrap)?;
+    Ok(bootstrap)
 }
 
 fn read_installed_bootstrap() -> Result<Bootstrap, String> {
@@ -497,8 +551,19 @@ fn validate_bootstrap(bootstrap: &Bootstrap) -> Result<(), String> {
     if let Some(installer) = &bootstrap.installer {
         validate_version(&installer.version)?;
         validate_artifact(&installer.artifact, MAX_COMPONENT_BYTES)?;
+        validate_artifact_object_key(
+            &installer.artifact,
+            &format!("installers/{}/windows-x64/", installer.version),
+        )?;
     }
-    validate_artifact(&bootstrap.release.manifest, MAX_MANIFEST_BYTES)
+    validate_artifact(&bootstrap.release.manifest, MAX_MANIFEST_BYTES)?;
+    validate_exact_object_key(
+        &bootstrap.release.manifest,
+        &format!(
+            "releases/{}/windows-x64/manifest.json",
+            bootstrap.release.version
+        ),
+    )
 }
 
 fn validate_manifest(manifest: &Manifest, bootstrap: &Bootstrap) -> Result<(), String> {
@@ -522,6 +587,10 @@ fn validate_manifest(manifest: &Manifest, bootstrap: &Bootstrap) -> Result<(), S
     for component in &manifest.components {
         validate_version(&component.version)?;
         validate_artifact(&component.artifact, MAX_COMPONENT_BYTES)?;
+        validate_artifact_object_key(
+            &component.artifact,
+            &format!("releases/{}/windows-x64/components/", manifest.version),
+        )?;
         match component.id.as_str() {
             "manager" | "codex"
                 if component.kind != "archive" || component.archive.as_deref() != Some("zip") =>
@@ -836,19 +905,93 @@ fn launcher_data_root() -> Result<PathBuf, String> {
 
 fn validate_artifact(artifact: &Artifact, max_size: u64) -> Result<(), String> {
     let url = reqwest::Url::parse(&artifact.url).map_err(|error| error.to_string())?;
-    let trusted_host = matches!(
-        url.host_str(),
-        Some("github.com")
-            | Some("objects.githubusercontent.com")
-            | Some("release-assets.githubusercontent.com")
-    );
-    if url.scheme() != "https" || !trusted_host {
-        return Err("组件来源必须是固定 HTTPS GitHub Releases 地址".to_string());
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url
+            .path()
+            .starts_with("/chengzhang0528/tauri-codex/releases/download/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("组件主来源必须是项目固定 HTTPS GitHub Release 地址".to_string());
+    }
+    if let Some(key) = artifact.object_key.as_deref() {
+        validate_object_key(key)?;
+        let url_name = url
+            .path_segments()
+            .and_then(Iterator::last)
+            .ok_or_else(|| "GitHub Release 资产名称缺失".to_string())?;
+        if key.rsplit('/').next() != Some(url_name) {
+            return Err("GitHub Release 资产与 OSS object key 文件名不一致".to_string());
+        }
     }
     if artifact.size == 0 || artifact.size > max_size {
         return Err(format!("组件大小不在允许范围内：{}", artifact.size));
     }
     normalize_digest(&artifact.sha256).map(|_| ())
+}
+
+fn validate_object_key(key: &str) -> Result<(), String> {
+    if key.is_empty()
+        || key.starts_with('/')
+        || key.contains('\\')
+        || key.split('/').any(|part| {
+            part.is_empty()
+                || matches!(part, "." | "..")
+                || part.chars().any(|character| {
+                    !(character.is_ascii_alphanumeric()
+                        || matches!(character, '.' | '-' | '_' | '@'))
+                })
+        })
+    {
+        return Err("OSS object key 不安全".to_string());
+    }
+    Ok(())
+}
+
+fn validate_artifact_object_key(artifact: &Artifact, prefix: &str) -> Result<(), String> {
+    if let Some(key) = artifact.object_key.as_deref() {
+        if !key.starts_with(prefix) {
+            return Err(format!("OSS object key 必须位于 {prefix}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_exact_object_key(artifact: &Artifact, expected: &str) -> Result<(), String> {
+    if let Some(key) = artifact.object_key.as_deref() {
+        if key != expected {
+            return Err(format!("OSS object key 必须是 {expected}"));
+        }
+    }
+    Ok(())
+}
+
+fn artifact_source_urls(artifact: &Artifact) -> Result<Vec<String>, String> {
+    validate_artifact(artifact, MAX_COMPONENT_BYTES)?;
+    let mut sources = vec![artifact.url.clone()];
+    if let Some(key) = artifact.object_key.as_deref() {
+        sources.push(format!("{OSS_BASE_URL}/{key}"));
+    }
+    Ok(sources)
+}
+
+fn try_trusted_sources<T>(
+    sources: Vec<String>,
+    label: &str,
+    mut attempt: impl FnMut(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut failures = Vec::new();
+    for source in sources {
+        match attempt(&source) {
+            Ok(value) => return Ok(value),
+            Err(error) => failures.push(format!("{source}: {error}")),
+        }
+    }
+    Err(format!(
+        "{label} 的所有受信来源均失败：{}",
+        failures.join("; ")
+    ))
 }
 
 fn read_json_artifact<T: for<'de> Deserialize<'de>>(
@@ -857,22 +1000,24 @@ fn read_json_artifact<T: for<'de> Deserialize<'de>>(
     label: &str,
 ) -> Result<T, String> {
     validate_artifact(artifact, max_size)?;
-    let response = http_client()?
-        .get(&artifact.url)
-        .send()
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    let bytes = response.bytes().map_err(|error| error.to_string())?;
-    if bytes.len() as u64 != artifact.size {
-        return Err(format!(
-            "{label} 大小不匹配：期望 {}，收到 {}",
-            artifact.size,
-            bytes.len()
-        ));
-    }
-    verify_digest(&bytes, &artifact.sha256)?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("{label} 无法解析：{error}"))
+    try_trusted_sources(artifact_source_urls(artifact)?, label, |source| {
+        let response = http_client()?
+            .get(source)
+            .send()
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let bytes = response.bytes().map_err(|error| error.to_string())?;
+        if bytes.len() as u64 != artifact.size {
+            return Err(format!(
+                "{label} 大小不匹配：期望 {}，收到 {}",
+                artifact.size,
+                bytes.len()
+            ));
+        }
+        verify_digest(&bytes, &artifact.sha256)?;
+        serde_json::from_slice(&bytes).map_err(|error| format!("{label} 无法解析：{error}"))
+    })
 }
 
 fn download_artifact(
@@ -895,45 +1040,72 @@ fn download_artifact(
         }
         fs::remove_file(destination).map_err(|error| error.to_string())?;
     }
-    let partial = destination.with_extension("part");
-    if partial.exists() {
-        fs::remove_file(&partial).map_err(|error| error.to_string())?;
-    }
+    try_trusted_sources(artifact_source_urls(artifact)?, component, |source| {
+        let partial = destination.with_extension("part");
+        if partial.exists() {
+            let _ = fs::remove_file(&partial);
+        }
+        let result = download_artifact_from_url(
+            source,
+            artifact,
+            &partial,
+            destination,
+            component,
+            progress,
+        );
+        if result.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        result
+    })
+}
+
+fn download_artifact_from_url(
+    source: &str,
+    artifact: &Artifact,
+    partial: &Path,
+    destination: &Path,
+    component: &str,
+    progress: &mut dyn FnMut(&str, &str, u64, u64),
+) -> Result<(), String> {
     let mut response = http_client()?
-        .get(&artifact.url)
+        .get(source)
         .send()
         .map_err(|error| error.to_string())?
         .error_for_status()
         .map_err(|error| error.to_string())?;
-    let mut file = File::create(&partial).map_err(|error| error.to_string())?;
+    let mut file = File::create(partial).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
     let mut size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     progress("正在下载组件", component, 0, artifact.size);
-    loop {
-        let read = response
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
+    let result = (|| {
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            size += read as u64;
+            if size > artifact.size || size > MAX_COMPONENT_BYTES {
+                return Err("组件下载超过清单大小".to_string());
+            }
+            file.write_all(&buffer[..read])
+                .map_err(|error| error.to_string())?;
+            hasher.update(&buffer[..read]);
+            progress("正在下载组件", component, size, artifact.size);
         }
-        size += read as u64;
-        if size > MAX_COMPONENT_BYTES {
-            let _ = fs::remove_file(&partial);
-            return Err("组件下载超过大小上限".to_string());
+        file.flush().map_err(|error| error.to_string())?;
+        progress("正在校验组件", component, size, artifact.size);
+        let digest = format!("{:x}", hasher.finalize());
+        if size != artifact.size || digest != normalize_digest(&artifact.sha256)? {
+            return Err("组件大小或 SHA-256 不匹配".to_string());
         }
-        file.write_all(&buffer[..read])
-            .map_err(|error| error.to_string())?;
-        hasher.update(&buffer[..read]);
-        progress("正在下载组件", component, size, artifact.size);
-    }
+        Ok(())
+    })();
     drop(file);
-    progress("正在校验组件", component, size, artifact.size);
-    let digest = format!("{:x}", hasher.finalize());
-    if size != artifact.size || digest != normalize_digest(&artifact.sha256)? {
-        let _ = fs::remove_file(&partial);
-        return Err("组件大小或 SHA-256 不匹配".to_string());
-    }
+    result?;
     fs::rename(partial, destination).map_err(|error| error.to_string())
 }
 
@@ -1054,6 +1226,22 @@ fn http_client() -> Result<Client, String> {
         .user_agent("tauri-codex-thin-launcher")
         .connect_timeout(Duration::from_secs(15))
         .timeout(NETWORK_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let trusted = matches!(
+                attempt.url().host_str(),
+                Some("github.com")
+                    | Some("objects.githubusercontent.com")
+                    | Some("release-assets.githubusercontent.com")
+                    | Some("shared-public-assets.oss-cn-beijing.aliyuncs.com")
+            );
+            if attempt.previous().len() >= 5 {
+                attempt.error("重定向次数超过限制")
+            } else if attempt.url().scheme() != "https" || !trusted {
+                attempt.error("重定向离开受信发布主机")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()
         .map_err(|error| error.to_string())
 }
@@ -1093,9 +1281,10 @@ fn validate_version(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_staged_release, current_release_path, current_release_version, installer_is_newer,
-        retry_windows_move, validate_artifact, verify_digest, Artifact, CurrentReleaseState,
-        WINDOWS_MOVE_RETRY_ATTEMPTS, WINDOWS_MOVE_RETRY_DELAY,
+        artifact_source_urls, commit_staged_release, current_release_path, current_release_version,
+        installer_is_newer, retry_windows_move, should_prepare_installed_release,
+        try_trusted_sources, validate_artifact, verify_digest, Artifact, CurrentReleaseState,
+        OSS_BASE_URL, WINDOWS_MOVE_RETRY_ATTEMPTS, WINDOWS_MOVE_RETRY_DELAY,
     };
     use sha2::Digest;
     use std::fs;
@@ -1105,10 +1294,52 @@ mod tests {
     fn rejects_non_github_artifact_sources() {
         let artifact = Artifact {
             url: "https://example.com/file".to_string(),
+            object_key: None,
             size: 1,
             sha256: "00".repeat(32),
         };
         assert!(validate_artifact(&artifact, 10).is_err());
+    }
+
+    #[test]
+    fn derives_only_the_fixed_oss_fallback_from_a_safe_object_key() {
+        let artifact = Artifact {
+            url: "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.8/manifest.json".to_string(),
+            object_key: Some("releases/0.1.8/windows-x64/manifest.json".to_string()),
+            size: 1,
+            sha256: "00".repeat(32),
+        };
+        assert_eq!(
+            artifact_source_urls(&artifact).unwrap(),
+            vec![
+                artifact.url.clone(),
+                format!("{OSS_BASE_URL}/releases/0.1.8/windows-x64/manifest.json"),
+            ]
+        );
+
+        let mut unsafe_artifact = artifact;
+        unsafe_artifact.object_key = Some("releases/0.1.8/../secret.json".to_string());
+        assert!(artifact_source_urls(&unsafe_artifact).is_err());
+    }
+
+    #[test]
+    fn tries_the_next_trusted_source_after_a_failure() {
+        let mut attempts = Vec::new();
+        let result = try_trusted_sources(
+            vec!["primary".to_string(), "fallback".to_string()],
+            "fixture",
+            |source| {
+                attempts.push(source.to_string());
+                if source == "primary" {
+                    Err("unreachable".to_string())
+                } else {
+                    Ok("verified")
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(result, "verified");
+        assert_eq!(attempts, vec!["primary", "fallback"]);
     }
 
     #[test]
@@ -1121,9 +1352,16 @@ mod tests {
 
     #[test]
     fn compares_installer_version_independently_from_manager_version() {
-        assert!(installer_is_newer("1.0.3").unwrap());
-        assert!(!installer_is_newer("1.0.2").unwrap());
+        assert!(installer_is_newer("1.0.4").unwrap());
+        assert!(!installer_is_newer("1.0.3").unwrap());
         assert!(!installer_is_newer("0.1.2").unwrap());
+    }
+
+    #[test]
+    fn new_installer_bootstrap_prepares_a_newer_release_before_old_manager_launch() {
+        assert!(should_prepare_installed_release("0.1.6", "0.1.8").unwrap());
+        assert!(!should_prepare_installed_release("0.1.8", "0.1.8").unwrap());
+        assert!(!should_prepare_installed_release("0.1.9", "0.1.8").unwrap());
     }
 
     #[test]
