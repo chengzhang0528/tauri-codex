@@ -610,12 +610,17 @@ fn activate_release(root: &Path, version: &str) -> Result<(), String> {
     validate_version(version)?;
     let releases = root.join("releases");
     let staging = releases.join(format!("staging-{version}"));
-    if !staging.join(".ready").is_file() {
+    let installed = installed_release_path(root, version);
+    let candidate = if staging.join(".ready").is_file() {
+        staging.as_path()
+    } else if installed.join(".ready").is_file() {
+        installed.as_path()
+    } else {
         return Err(format!("release {version} 尚未完整 stage"));
-    }
-    doctor_manager(&staging.join("manager"))
+    };
+    doctor_manager(&candidate.join("manager"))
         .map_err(|error| format!("激活前检查 Manager 失败：{error}"))?;
-    doctor_codex(&staging.join("codex"))
+    doctor_codex(&candidate.join("codex"))
         .map_err(|error| format!("激活前检查 Codex 失败：{error}"))?;
     commit_staged_release(root, version)
 }
@@ -1116,8 +1121,8 @@ mod tests {
 
     #[test]
     fn compares_installer_version_independently_from_manager_version() {
-        assert!(installer_is_newer("1.0.2").unwrap());
-        assert!(!installer_is_newer("1.0.1").unwrap());
+        assert!(installer_is_newer("1.0.3").unwrap());
+        assert!(!installer_is_newer("1.0.2").unwrap());
         assert!(!installer_is_newer("0.1.2").unwrap());
     }
 
@@ -1204,6 +1209,13 @@ mod tests {
         let repeated: CurrentReleaseState =
             serde_json::from_slice(&fs::read(root.join("releases/current.json")).unwrap()).unwrap();
         assert_eq!(repeated.previous.as_deref(), Some("0.1.4"));
+
+        fs::remove_file(root.join("releases/current.json")).unwrap();
+        commit_staged_release(&root, "0.1.5").unwrap();
+        assert_eq!(
+            current_release_version(&root).unwrap().as_deref(),
+            Some("0.1.5")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

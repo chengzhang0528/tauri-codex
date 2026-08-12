@@ -23,9 +23,9 @@ test("desktop packaging keeps the stable installer independent and thin", () => 
   const app = JSON.parse(readFileSync(new URL("../app/package.json", import.meta.url), "utf8"));
   const installer = JSON.parse(readFileSync(new URL("../app/installer-versions.json", import.meta.url), "utf8"));
   const tauri = JSON.parse(readFileSync(new URL("../app/src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(app.version, "0.1.4");
-  assert.equal(installer.installerVersion, "1.0.1");
-  assert.equal(installer.releaseTag, "v0.1.4");
+  assert.equal(app.version, "0.1.5");
+  assert.equal(installer.installerVersion, "1.0.2");
+  assert.equal(installer.releaseTag, "v0.1.5");
   assert.equal(tauri.version, installer.installerVersion);
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
