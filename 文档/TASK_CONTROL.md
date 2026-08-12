@@ -14,7 +14,7 @@ Depends On:
 
 | ID | 状态 | 执行类型 | 范围 | 候选/制品 | 下一可验证结果 | 入口 |
 |---|---|---|---|---|---|---|
-| DEP-0002 | InProgress | Deployment | tauri-codex / GitHub Releases v0.1.5 | Commit:be8f12a66df97829fac4c7885286742c5d07e318 | 发布并回读 v0.1.5 的 Installer、Bootstrap、manifest 与组件闭包 | `文档/项目/项目_tauri-codex/推进中/DEP-0002-v0.1.5-GitHub-Release发布.md` |
+| - | - | - | - | - | - | - |
 
 ## 维护规则
 
