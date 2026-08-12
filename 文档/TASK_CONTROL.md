@@ -14,6 +14,7 @@ Depends On:
 
 | ID | 状态 | 执行类型 | 范围 | 候选/制品 | 下一可验证结果 | 入口 |
 |---|---|---|---|---|---|---|
+| DEP-0004 | InProgress | Deployment | tauri-codex / GitHub Releases v0.1.7 | Commit:b48a55035b54bc6ee53dbf77a58fede4a0b2c5bc | 发布并回读 v0.1.7 的 Bootstrap、manifest 与组件闭包 | `文档/项目/项目_tauri-codex/推进中/DEP-0004-v0.1.7-GitHub-Release发布.md` |
 ## 维护规则
 
 - 只有已授权工作需要跨会话恢复、持续阻断恢复或外部部分状态恢复时才登记。
