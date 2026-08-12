@@ -33,6 +33,7 @@ Depends On:
 - `项目/项目_tauri-codex/产品契约.md` -> `ProductContract`
 - `项目/项目_tauri-codex/决策/` -> `Decision`
 - `项目/项目_tauri-codex/运行/` -> `Runbook`
+- `项目/项目_tauri-codex/推进中/` -> `ChangePlan,SystemTestPlan,DeploymentPlan,Issue`
 
 首次出现有可靠依据的未承诺结果时，在本文件同一改动中声明 `WORK_CANDIDATES.md -> WorkInventory`；首次出现实际工作空间级设计、决策、运行或活动事实时，也在同一改动中声明其精确位置与 Kind。
 
