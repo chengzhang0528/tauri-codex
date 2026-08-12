@@ -10,6 +10,10 @@ default-run = "tauri-codex"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+
 [lib]
 name = "tauri_codex_lib"
 crate-type = ["rlib"]
@@ -17,6 +21,7 @@ crate-type = ["rlib"]
 [[bin]]
 name = "tauri-codex-manager"
 path = "src/manager_main.rs"
+required-features = ["custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

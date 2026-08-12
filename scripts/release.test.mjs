@@ -47,9 +47,15 @@ test("launcher event subscriptions are covered by the default capability", () =>
 test("split launcher and manager are explicit build outputs", () => {
   const vite = readFileSync(new URL("../app/vite.config.ts", import.meta.url), "utf8");
   const cargo = readFileSync(new URL("../app/src-tauri/Cargo.toml", import.meta.url), "utf8");
+  const managerMain = readFileSync(new URL("../app/src-tauri/src/manager_main.rs", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("./windows-pipeline.mjs", import.meta.url), "utf8");
   assert.match(vite, /launcher:\s*resolve/);
   assert.match(cargo, /^default-run\s*=\s*"tauri-codex"$/m);
+  assert.match(cargo, /^custom-protocol\s*=\s*\["tauri\/custom-protocol"\]$/m);
+  assert.match(cargo, /^required-features\s*=\s*\["custom-protocol"\]$/m);
   assert.match(pipeline, /--bin",\s*"tauri-codex-manager"/);
+  assert.match(pipeline, /--features",\s*"custom-protocol"/);
+  assert.match(managerMain, /not\(feature = "custom-protocol"\)/);
+  assert.match(managerMain, /compile_error!/);
   assert.match(pipeline, /writeFileSync\(bootstrapResource[\s\S]*tauri",\s*"--",\s*"bundle"/);
 });

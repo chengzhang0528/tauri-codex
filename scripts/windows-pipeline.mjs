@@ -212,6 +212,7 @@ function buildManager(toolchain) {
     "--manifest-path", path.join(appRoot, "src-tauri", "Cargo.toml"),
     "--release", "--target", config.rustTarget,
     "--bin", "tauri-codex-manager",
+    "--features", "custom-protocol",
   ], { env: toolchain.env });
   if (!existsSync(managerSource)) fail(`Manager 构建产物不存在：${managerSource}`);
 }
