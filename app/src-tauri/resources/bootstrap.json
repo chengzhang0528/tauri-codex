@@ -7,16 +7,16 @@
     "version": "1.0.2",
     "artifact": {
       "url": "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.6/tauri-codex_1.0.2_x64-setup.exe",
-      "size": 13167568,
-      "sha256": "37b76be82a4d30f2cf32bb04e629237e97e59412f360609288cc16c077295c71"
+      "size": 13172716,
+      "sha256": "e84987734574fc91fe83b4c7a101a05d5573f1b4709a4e1f20e0b992e06bf7eb"
     }
   },
   "release": {
-    "version": "0.1.6",
+    "version": "0.1.7",
     "manifest": {
-      "url": "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.6/manifest.json",
+      "url": "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.7/manifest.json",
       "size": 1347,
-      "sha256": "51c9ef0376e5ae0b096ac9f87b8b742603e2ab0401111c984e0eeea750e79c51"
+      "sha256": "1be717915402f6d0751ffcc037da6249a390054af6f6ae2ed13e21c325832b1b"
     }
   }
 }

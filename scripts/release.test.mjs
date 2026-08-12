@@ -21,9 +21,13 @@ test("application version updates do not require an installer version change", (
 
 test("desktop packaging keeps the stable installer independent and thin", () => {
   const app = JSON.parse(readFileSync(new URL("../app/package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("../app/package-lock.json", import.meta.url), "utf8"));
+  const cargo = readFileSync(new URL("../app/src-tauri/Cargo.toml", import.meta.url), "utf8");
   const installer = JSON.parse(readFileSync(new URL("../app/installer-versions.json", import.meta.url), "utf8"));
   const tauri = JSON.parse(readFileSync(new URL("../app/src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(app.version, "0.1.6");
+  assert.equal(lock.version, app.version);
+  assert.equal(lock.packages[""].version, app.version);
+  assert.match(cargo, new RegExp(`^version = "${app.version.replaceAll(".", "\\.")}"$`, "m"));
   assert.equal(installer.installerVersion, "1.0.2");
   assert.equal(installer.releaseTag, "v0.1.6");
   assert.equal(tauri.version, installer.installerVersion);
