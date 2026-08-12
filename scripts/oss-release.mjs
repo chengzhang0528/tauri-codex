@@ -161,14 +161,13 @@ function readRelease(releaseRoot) {
   }
   const installerName = path.posix.basename(bootstrap.installer.artifact.objectKey);
   const installerPath = path.join(releaseRoot, installerName);
-  if (!existsSync(installerPath)) throw new Error(`local Installer is missing: ${installerName}`);
   const components = manifest.components.map((component) => ({
     component,
     bytes: readFileSync(path.join(releaseRoot, "components", path.posix.basename(component.artifact.objectKey))),
   }));
   return {
     bootstrap, bootstrapBytes, manifest, manifestBytes,
-    installerBytes: readFileSync(installerPath), components,
+    installerBytes: existsSync(installerPath) ? readFileSync(installerPath) : null, components,
   };
 }
 
@@ -220,14 +219,14 @@ export async function commitRelease({ releaseRoot, accessKeyId, accessKeySecret,
   const release = readRelease(releaseRoot);
   await rejectDowngrade(fetchImpl, baseURL, release);
   const artifacts = [
-    [release.bootstrap.installer.artifact, release.installerBytes, "Installer"],
-    ...release.components.map(({ component, bytes }) => [component.artifact, bytes, component.id]),
-    [release.bootstrap.release.manifest, release.manifestBytes, "manifest"],
+    [release.bootstrap.installer.artifact, "Installer"],
+    ...release.components.map(({ component }) => [component.artifact, component.id]),
+    [release.bootstrap.release.manifest, "manifest"],
   ];
-  for (const [artifact, bytes, label] of artifacts) {
+  for (const [artifact, label] of artifacts) {
     await readVerified(fetchImpl, artifact.url, artifact, `GitHub ${label}`);
     const mirrored = await getOSS(fetchImpl, baseURL, artifact.objectKey);
-    if (!mirrored || mirrored.length !== bytes.length || sha256(mirrored) !== artifact.sha256) {
+    if (!mirrored || mirrored.length !== artifact.size || sha256(mirrored) !== artifact.sha256) {
       throw new Error(`OSS ${label} is missing or differs before Bootstrap commit`);
     }
   }

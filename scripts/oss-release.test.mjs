@@ -143,6 +143,21 @@ test("stages immutable objects without publishing Bootstrap", async () => {
   }
 });
 
+test("stages a reused stable Installer from its existing GitHub asset", async () => {
+  const release = fixture("0.1.9", "1.0.3");
+  const installerName = path.posix.basename(release.bootstrap.installer.artifact.objectKey);
+  rmSync(path.join(release.root, installerName));
+  const remote = fakeFetch(release.github);
+  try {
+    await stageRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl });
+    assert.deepEqual(remote.objects.get(release.bootstrap.installer.artifact.objectKey), release.github.get(release.bootstrap.installer.artifact.url));
+    assert.equal(remote.events.some((event) => event.startsWith("github:") && event.includes(installerName)), true);
+    assert.equal(remote.events.includes(`put:${OSS_BOOTSTRAP_KEY}`), false);
+  } finally {
+    rmSync(release.root, { recursive: true, force: true });
+  }
+});
+
 test("publishes immutable closure, reads it back, and commits Bootstrap last", async () => {
   const release = fixture();
   const remote = fakeFetch(release.github);
