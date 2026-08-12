@@ -223,14 +223,6 @@ fn dispatch(app: &AppHandle, state: &AppState, call: BridgeCall) -> Result<Value
         )?),
         "check_app_update" => value(commands::check_app_update()?),
         "check_codex_update" => value(commands::check_codex_update(app.clone())?),
-        "download_app_update" => value(commands::download_app_update(
-            app.clone(),
-            argument(&call.args, "url")?,
-            argument(&call.args, "filename")?,
-            argument(&call.args, "size")?,
-            argument(&call.args, "digest")?,
-            argument(&call.args, "releaseTag")?,
-        )?),
         "stage_app_update" => value(commands::stage_app_update(app.clone())?),
         "stage_codex_update" => value(commands::stage_codex_update(
             app.clone(),

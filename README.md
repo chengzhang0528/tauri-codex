@@ -1,12 +1,12 @@
 # tauri-codex
 
-面向 Windows 10 22H2 / Windows 11 x64 的 Codex 桌面封装，使用唯一 Tauri 主窗口、内嵌 xterm、ConPTY 和应用内置 `@openai/codex`。
+面向 Windows 10 22H2 / Windows 11 x64 的 Codex 桌面封装，使用 Here 式薄安装器、唯一 Tauri 主窗口、内嵌 xterm、ConPTY 和应用私有 `@openai/codex`。
 
 tauri-codex 是独立的社区项目，不是 OpenAI 官方产品，也不代表 OpenAI 提供支持或担保。
 
 ## 当前可用范围
 
-当前公开版本为 [`v0.1.0`](https://github.com/chengzhang0528/tauri-codex/releases/tag/v0.1.0)。Windows x64 用户可以从 Release 页面下载 `tauri-codex_0.1.0_x64-setup.exe`，也可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 安装包。
+当前源码候选版本为 `v0.1.3`；公开版本和 Windows x64 安装程序以 [GitHub Releases](https://github.com/chengzhang0528/tauri-codex/releases/latest) 为准，也可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 薄安装器。
 
 - 支持 Windows 10 22H2 x64 和 Windows 11 x64。
 - 不支持更早的 Windows、Windows ARM64、macOS 或 Linux；这些场景可以按[支持说明](SUPPORT.md)提交功能建议。

@@ -1,0 +1,20 @@
+:root { font-family: Inter, "Segoe UI", sans-serif; color: #242824; background: #f5f6f3; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 420px; min-height: 300px; }
+button { font: inherit; }
+#launcher { min-height: 100vh; display: grid; place-items: center; padding: 36px; }
+.launcher-shell { width: min(520px, 100%); }
+.product-mark { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 28px; border-radius: 7px; color: #fff; background: #204f38; font-size: 13px; font-weight: 750; }
+.eyebrow { margin: 0 0 8px; color: #667067; font-size: 11px; font-weight: 700; }
+h1 { margin: 0; font-size: 25px; font-weight: 680; letter-spacing: 0; }
+.phase { min-height: 42px; margin: 12px 0 0; color: #687068; font-size: 12px; line-height: 1.6; }
+.progress-block { margin-top: 34px; }
+.progress-meta { display: flex; justify-content: space-between; gap: 18px; min-height: 18px; color: #5e675f; font-size: 10px; }
+.progress-track { height: 7px; overflow: hidden; border-radius: 4px; background: #dde1dc; }
+.progress-track span { display: block; height: 100%; border-radius: inherit; background: #26724e; transition: width .2s ease; }
+.progress-track span.indeterminate { width: 38% !important; animation: loading 1.25s ease-in-out infinite; }
+.status-note { display: flex; align-items: center; gap: 8px; margin-top: 22px; color: #6c746c; font-size: 10px; }
+.status-note svg { width: 14px; height: 14px; }
+button { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; margin-top: 22px; padding: 0 16px; border: 1px solid #1d5f40; border-radius: 6px; color: #fff; background: #246d49; cursor: pointer; }
+button svg { width: 15px; height: 15px; }
+@keyframes loading { from { transform: translateX(-110%); } to { transform: translateX(270%); } }

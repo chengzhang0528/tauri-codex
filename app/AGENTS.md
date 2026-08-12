@@ -8,7 +8,7 @@ Updated: 2026-08-10
 Depends On:
 - ../文档/项目/项目_tauri-codex/AGENTS.md
 
-源码根已建立并使用 Tauri 2、TypeScript/Vite 和 Rust。Windows x64 NSIS Setup 通过 installer hook 安装或复用系统 Node.js/npm；桌面运行时由 `src-tauri/` 管理每会话独立的 Session Host、ConPTY、应用专属 `CODEX_HOME`、模型实例文件和更新事务；`src/` 负责主页面内嵌的原生 Codex TUI xterm、会话启动器、模型实例和设置。
+源码根已建立并使用 Tauri 2、TypeScript/Vite 和 Rust。Windows x64 NSIS Setup 是 Here 式薄安装器，只携带稳定 Launcher、Bootstrap、图标和许可证；Launcher 按 GitHub Release manifest 探测、下载、校验、doctor 并激活 Manager、应用私有 Codex 和 Node fallback。桌面运行时由 `src-tauri/` 管理每会话独立的 Session Host、ConPTY、应用专属 `CODEX_HOME`、模型实例文件和更新事务；`src/` 负责主页面内嵌的原生 Codex TUI xterm、会话启动器、模型实例和设置。
 
 ## 命令
 

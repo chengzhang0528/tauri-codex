@@ -50,7 +50,6 @@ function updateVersions(current, next) {
       if (text.split(marker).length - 1 !== 1) throw new Error("app/src-tauri/Cargo.toml has an unexpected version count");
       return text.replace(marker, `version = "${next}"`);
     }],
-    [path.join(appRoot, "src-tauri", "tauri.conf.json"), (text) => replaceVersion(text, current, next, "app/src-tauri/tauri.conf.json")],
   ];
   for (const [file, transform] of files) writeFileSync(file, transform(readFileSync(file, "utf8")), "utf8");
 }

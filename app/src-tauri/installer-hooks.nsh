@@ -1,8 +1,12 @@
 !macro NSIS_HOOK_POSTINSTALL
-  DetailPrint "Checking system Node.js and npm..."
-  ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --ensure-system-runtime' $0
+  Call CreateOrUpdateDesktopShortcut
+  DetailPrint "Checking thin installer bootstrap..."
+  ExecWait '"$INSTDIR\${MAINBINARYNAME}.exe" --thin-setup' $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Node.js/npm installation or validation failed. tauri-codex was installed, but Codex cannot start until Setup completes the system runtime installation."
+    MessageBox MB_ICONSTOP|MB_OK "tauri-codex was installed, but its thin installer bootstrap is invalid. Please report an Issue with the installer version."
     Abort
+  ${EndIf}
+  ${If} ${Silent}
+    Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
   ${EndIf}
 !macroend

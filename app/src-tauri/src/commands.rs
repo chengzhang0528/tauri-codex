@@ -569,18 +569,6 @@ pub fn check_codex_update(app: AppHandle) -> Result<CodexUpdateInfo, String> {
 }
 
 #[tauri::command]
-pub fn download_app_update(
-    app: AppHandle,
-    url: String,
-    filename: String,
-    size: u64,
-    digest: Option<String>,
-    release_tag: String,
-) -> Result<UpdateResult, String> {
-    updates::download_release(&app, &url, &filename, size, digest.as_deref(), &release_tag)
-}
-
-#[tauri::command]
 pub fn stage_app_update(app: AppHandle) -> Result<UpdateResult, String> {
     updates::stage_latest_release(&app)
 }

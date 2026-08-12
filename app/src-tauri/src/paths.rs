@@ -36,7 +36,23 @@ pub fn server_env_key(id: &str) -> String {
 }
 
 pub fn current_codex_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(codex_root(app)?.join("current"))
+    let independently_managed = codex_root(app)?.join("current");
+    let managed = app_data_root(app)?.join("releases/current/codex");
+    match (
+        codex_version_in(&independently_managed),
+        codex_version_in(&managed),
+    ) {
+        (Some(independent), Some(release)) if release > independent => Ok(managed),
+        (Some(_), _) => Ok(independently_managed),
+        (None, Some(_)) => Ok(managed),
+        (None, None) => Ok(independently_managed),
+    }
+}
+
+fn codex_version_in(root: &Path) -> Option<semver::Version> {
+    let package = root.join("node_modules/@openai/codex/package.json");
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(package).ok()?).ok()?;
+    semver::Version::parse(value.get("version")?.as_str()?).ok()
 }
 
 pub fn codex_entry(app: &AppHandle) -> Result<PathBuf, String> {
@@ -219,7 +235,7 @@ where
         .unwrap_or(false)
 }
 
-fn ensure_bundled_codex(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn ensure_bundled_codex(app: &AppHandle) -> Result<(), String> {
     let current = current_codex_dir(app)?;
     if current
         .join("node_modules/@openai/codex/package.json")
@@ -269,7 +285,7 @@ fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::npm_cli_for_node;
+    use super::{codex_version_in, npm_cli_for_node};
     use std::fs;
 
     #[test]
@@ -285,6 +301,23 @@ mod tests {
         fs::write(&cli, []).expect("create npm marker");
 
         assert_eq!(npm_cli_for_node(&node), Some(cli));
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn reads_a_managed_codex_version_without_running_it() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-version-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let package = root.join("node_modules/@openai/codex/package.json");
+        fs::create_dir_all(package.parent().expect("package parent")).expect("create package tree");
+        fs::write(&package, br#"{"version":"0.147.0"}"#).expect("write package");
+
+        assert_eq!(
+            codex_version_in(&root).expect("version").to_string(),
+            "0.147.0"
+        );
         fs::remove_dir_all(root).expect("remove fixture");
     }
 }

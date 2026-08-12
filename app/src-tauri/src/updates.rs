@@ -38,7 +38,8 @@ pub fn check_release() -> Result<ReleaseInfo, String> {
         .map_err(|error| error.to_string())?
         .json()
         .map_err(|error| error.to_string())?;
-    let update_available = is_newer_version(&response.tag_name, env!("CARGO_PKG_VERSION"))?;
+    let update_available = is_newer_version(&response.tag_name, env!("CARGO_PKG_VERSION"))?
+        || crate::thin::installer_update_available().unwrap_or(false);
     Ok(ReleaseInfo {
         tag_name: response.tag_name,
         name: response.name.unwrap_or_default(),
@@ -69,7 +70,8 @@ fn no_release_info() -> ReleaseInfo {
     }
 }
 
-pub fn download_release(
+#[allow(dead_code)]
+fn download_release(
     app: &AppHandle,
     url: &str,
     filename: &str,
@@ -337,86 +339,23 @@ pub fn activate_codex(app: &AppHandle, version: &str) -> Result<UpdateResult, St
     })
 }
 
-pub fn staged_app_updates(app: &AppHandle) -> Result<Vec<String>, String> {
-    let root = paths::updates_dir(app)?;
-    let mut files = Vec::new();
-    for release in fs::read_dir(root).map_err(|error| error.to_string())? {
-        let release = release.map_err(|error| error.to_string())?;
-        if !release.path().is_dir() {
-            continue;
-        }
-        for file in fs::read_dir(release.path()).map_err(|error| error.to_string())? {
-            let file = file.map_err(|error| error.to_string())?.path();
-            if file.is_file()
-                && matches!(
-                    file.extension().and_then(|extension| extension.to_str()),
-                    Some("msi") | Some("exe")
-                )
-            {
-                files.push(file.to_string_lossy().to_string());
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
+pub fn staged_app_updates(_app: &AppHandle) -> Result<Vec<String>, String> {
+    crate::thin::staged_releases()
 }
 
-pub fn stage_latest_release(app: &AppHandle) -> Result<UpdateResult, String> {
-    let release = check_release()?;
-    if !release.update_available {
-        return Err("当前已是最新桌面版本".to_string());
-    }
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name.ends_with(".exe"))
-        .or_else(|| {
-            release
-                .assets
-                .iter()
-                .find(|asset| asset.name.ends_with(".msi"))
-        })
-        .ok_or_else(|| "最新 GitHub Release 未包含 Windows 安装资产".to_string())?;
-    download_release(
-        app,
-        &asset.download_url,
-        &asset.name,
-        asset.size,
-        asset.digest.as_deref(),
-        &release.tag_name,
-    )
+pub fn stage_latest_release(_app: &AppHandle) -> Result<UpdateResult, String> {
+    let version = crate::thin::stage_latest_release()?;
+    Ok(UpdateResult {
+        path: crate::thin::staged_release_path(&version)?
+            .to_string_lossy()
+            .to_string(),
+        version,
+        kind: "desktop-staged".to_string(),
+    })
 }
 
 pub fn launch_desktop_update(app: &AppHandle, path: &str) -> Result<(), String> {
-    let candidate = PathBuf::from(path);
-    let updates = paths::updates_dir(app)?;
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|error| format!("更新资产不可用：{error}"))?;
-    let root = updates
-        .canonicalize()
-        .map_err(|error| format!("更新目录不可用：{error}"))?;
-    if !canonical.starts_with(&root) {
-        return Err("更新资产必须来自应用更新目录".to_string());
-    }
-    match canonical
-        .extension()
-        .and_then(|extension| extension.to_str())
-    {
-        Some(extension) if extension.eq_ignore_ascii_case("msi") => {
-            Command::new("msiexec.exe")
-                .args(["/i", &canonical.to_string_lossy(), "/passive", "/norestart"])
-                .spawn()
-                .map_err(|error| format!("无法启动 MSI 更新：{error}"))?;
-        }
-        Some(extension) if extension.eq_ignore_ascii_case("exe") => {
-            Command::new(&canonical)
-                .arg("/S")
-                .spawn()
-                .map_err(|error| format!("无法启动桌面更新：{error}"))?;
-        }
-        _ => return Err("桌面更新只支持 MSI 或 EXE 资产".to_string()),
-    }
+    crate::thin::launch_release_activation(path)?;
     app.exit(0);
     Ok(())
 }

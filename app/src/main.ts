@@ -1092,17 +1092,10 @@ function bindSettingsView(
       return;
     }
     const release = await call<ReleaseInfo>("check_app_update");
-    const asset = chooseDesktopAsset(release.assets);
-    if (!release.update_available || !asset) return;
+    if (!release.update_available) return;
     try {
-      const result = await call<UpdateResult>("download_app_update", {
-        url: asset.download_url,
-        filename: asset.name,
-        size: asset.size,
-        digest: asset.digest ?? null,
-        releaseTag: release.tag_name,
-      });
-      setStatus(`桌面更新 ${result.version} 已下载`, "success");
+      const result = await call<UpdateResult>("stage_app_update");
+      setStatus(`桌面更新 ${result.version} 已暂存`, "success");
       await refreshSnapshot();
     } catch (error) {
       setStatus(String(error), "error");
@@ -1137,22 +1130,19 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
   checkButton.disabled = updateState.checking;
 
   const release = updateState.release;
-  const asset = chooseDesktopAsset(release?.assets ?? []);
   const desktopStaged = snapshot.staged_app_updates.length > 0;
   if (updateState.checking) desktopSummary.textContent = "正在检查";
-  else if (desktopStaged) desktopSummary.textContent = "更新已下载";
+  else if (desktopStaged) desktopSummary.textContent = `${snapshot.staged_app_updates[snapshot.staged_app_updates.length - 1]} 已暂存`;
   else if (release?.tag_name) {
-    desktopSummary.textContent = release.update_available
-      ? asset ? `${release.tag_name} 可用` : `${release.tag_name} 未包含 Windows 安装包`
-      : "已是最新版本";
+    desktopSummary.textContent = release.update_available ? `${release.tag_name} 可用` : "已是最新版本";
   } else if (release) desktopSummary.textContent = "GitHub Releases 暂无发布版本";
   else desktopSummary.textContent = "尚未检查";
   if (desktopStaged) {
-    setButtonContent(desktopButton, snapshot.terminals.length > 0 ? "会话运行中" : "安装更新", "download");
+    setButtonContent(desktopButton, snapshot.terminals.length > 0 ? "会话运行中" : "重启并应用", "download");
     desktopButton.disabled = snapshot.terminals.length > 0;
   } else {
-    setButtonContent(desktopButton, release?.update_available && asset ? "下载更新" : "暂无更新", "download");
-    desktopButton.disabled = updateState.checking || !release?.update_available || !asset;
+    setButtonContent(desktopButton, release?.update_available ? "准备更新" : "暂无更新", "download");
+    desktopButton.disabled = updateState.checking || !release?.update_available;
   }
 
   const pendingCodex = snapshot.pending_codex_versions[snapshot.pending_codex_versions.length - 1];
@@ -1164,7 +1154,7 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
       : `最新版本 ${updateState.codex.latest_version}`;
   } else codexSummary.textContent = "尚未检查";
   if (pendingCodex) {
-    setButtonContent(codexButton, snapshot.terminals.length > 0 ? "会话运行中" : "应用更新", "download");
+    setButtonContent(codexButton, snapshot.terminals.length > 0 ? "会话运行中" : "应用 Codex 更新", "download");
     codexButton.disabled = snapshot.terminals.length > 0;
   } else {
     setButtonContent(codexButton, updateState.codex?.update_available ? "更新 Codex" : "暂无更新", "download");
@@ -1176,10 +1166,6 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
 function setButtonContent(button: HTMLButtonElement, label: string, icon: "download" | "refresh-cw"): void {
   button.innerHTML = `<i data-lucide="${icon}"></i><span>${escapeHtml(label)}</span>`;
 }
-function chooseDesktopAsset(assets: ReleaseAsset[]): ReleaseAsset | undefined {
-  return assets.find((asset) => /\.exe$/i.test(asset.name)) ?? assets.find((asset) => /\.msi$/i.test(asset.name));
-}
-
 window.addEventListener("DOMContentLoaded", () => {
   void waitForBridgeReady().then(() => renderControl()).catch((error) => {
     if (app) app.innerHTML = `<main class="fatal-error"><h1>tauri-codex 启动失败</h1><p>${escapeHtml(String(error))}</p></main>`;

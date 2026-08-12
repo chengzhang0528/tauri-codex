@@ -1,6 +1,6 @@
 [package]
 name = "tauri-codex"
-version = "0.1.2"
+version = "0.1.3"
 description = "A Windows desktop wrapper for the bundled OpenAI Codex CLI"
 authors = ["tauri-codex maintainers"]
 license = "GPL-3.0-or-later"
@@ -12,6 +12,10 @@ edition = "2021"
 [lib]
 name = "tauri_codex_lib"
 crate-type = ["rlib"]
+
+[[bin]]
+name = "tauri-codex-manager"
+path = "src/manager_main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -29,4 +33,5 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 semver = "1"
 tiny_http = "0.12"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

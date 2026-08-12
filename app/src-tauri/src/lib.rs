@@ -7,13 +7,12 @@ mod model;
 mod paths;
 mod runtime;
 mod sessions;
+mod thin;
 mod updates;
 
 use commands::AppState;
 use serde::Serialize;
-#[cfg(debug_assertions)]
-use tauri::Manager;
-use tauri::{AppHandle, Emitter, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(debug_assertions)]
 fn keep_browser_bridge_alive(code: Option<i32>) -> bool {
@@ -44,7 +43,7 @@ where
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run_manager() {
     match std::env::args().nth(1).as_deref() {
         Some("--session-host") => {
             if let Err(error) = host::run_from_stdin() {
@@ -67,6 +66,13 @@ pub fn run() {
                 1
             });
         }
+        Some("--thin-setup") => {
+            std::process::exit(if thin::validate_installer_bootstrap().is_ok() {
+                0
+            } else {
+                1
+            });
+        }
         _ => {}
     }
 
@@ -76,6 +82,11 @@ pub fn run() {
         .manage(state)
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("tauri-codex")
+                .inner_size(1220.0, 780.0)
+                .min_inner_size(980.0, 640.0)
+                .build()?;
             runtime::check_system_node().map_err(std::io::Error::other)?;
             paths::codex_entry(app.handle()).map_err(std::io::Error::other)?;
             commands::sync_server_profiles(app.handle()).map_err(std::io::Error::other)?;
@@ -105,7 +116,6 @@ pub fn run() {
             commands::force_terminate_terminal,
             commands::check_app_update,
             commands::check_codex_update,
-            commands::download_app_update,
             commands::stage_app_update,
             commands::stage_codex_update,
             commands::install_codex_update,
@@ -124,6 +134,45 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+pub fn run_launcher() {
+    match thin::run_launcher_action() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Launcher action failed: {error}");
+            std::process::exit(1);
+        }
+    }
+    match thin::launch_current_if_ready() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => eprintln!("Current release is unavailable: {error}"),
+    }
+
+    tauri::Builder::default()
+        .manage(thin::LauncherState::default())
+        .setup(|app| {
+            WebviewWindowBuilder::new(app, "launcher", WebviewUrl::App("launcher.html".into()))
+                .title("tauri-codex")
+                .inner_size(600.0, 420.0)
+                .min_inner_size(460.0, 340.0)
+                .resizable(true)
+                .build()?;
+            thin::start_launcher_setup(
+                app.handle().clone(),
+                app.state::<thin::LauncherState>().inner(),
+            )
+            .map_err(std::io::Error::other)?;
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            thin::get_launcher_status,
+            thin::retry_launcher_setup
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri-codex launcher");
 }
 
 #[cfg(all(test, debug_assertions))]

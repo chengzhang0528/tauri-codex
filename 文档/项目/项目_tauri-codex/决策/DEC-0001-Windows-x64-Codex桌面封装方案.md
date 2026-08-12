@@ -24,7 +24,7 @@ Depends On:
 | 决策 | 已确定方案 | Owner | 依据 |
 |---|---|---|---|
 | Windows 平台 | Windows 10 22H2 x64 与 Windows 11 x64 共用实现路径 | Installer 与桌面应用 | 用户决定 |
-| 安装入口 | NSIS per-machine Setup 安装应用和基线 Codex，并在 post-install bootstrap 中复用或安装系统 Node.js/npm | Setup | 安装程序职责 |
+| 安装入口 | NSIS x64 薄安装器只安装稳定 Launcher、图标、Bootstrap 与许可证；Manager、Codex、Node fallback 按清单获取 | Setup/Launcher | Here 式交付边界 |
 | Codex 所有权 | 基线与更新版 Codex 都位于应用私有目录，不安装或搜索系统全局 Codex | Updater | 产品不变量 |
 | 会话界面 | 主 Tauri 窗口内嵌终端甲板；每个会话持有独立 xterm，任一时刻只显示当前选中的一个 | Tauri 前端 | 用户最新决定 |
 | 新会话 | 控制窗口启动无子命令的内置 `codex`；第一条用户输入由 Codex 创建 session | Codex TUI | 原生 CLI 行为 |
@@ -35,15 +35,16 @@ Depends On:
 | 输出压力 | Session Host 和对应嵌入 xterm 之间使用有界队列与逐批渲染确认；过载只影响对应会话 | Tauri Rust runtime 与 xterm | 防止终端输出洪泛 |
 | 模型实例 | 每个 Responses API 实例保存名称、URL、API Key 和唯一默认标记，并生成不含 model 的独立 `<profile>.config.toml` | 配置层与 Codex | 用户决定与 Codex 0.134+ 配置规则 |
 | 配置隔离 | 所有 Codex 进程显式使用同一个应用专属 `CODEX_HOME` | Tauri Rust runtime | 用户决定与官方能力 |
-| 更新 | 桌面资产来自 GitHub Releases；Codex 在应用私有 staging 验证并切换；所有 TUI 归零后激活 | Tauri updater 与 Setup | 用户决定 |
+| 更新 | GitHub Releases 提供不可变 Installer、manifest 与组件资产；Launcher 负责探测、下载、校验、staging、激活与 previous 保留 | Launcher/Updater | 用户决定 |
 
 ## 运行结构
 
 ```mermaid
 flowchart LR
-  Setup["NSIS Setup"] --> Desktop["Tauri 控制窗口"]
-  Setup --> Node["系统 Node.js/npm"]
-  Setup --> Bundled["应用私有 Codex"]
+  Setup["NSIS 薄 Setup"] --> Launcher["稳定 Launcher"]
+  Launcher --> Desktop["Tauri Manager"]
+  Launcher --> Node["系统 Node.js/npm"]
+  Launcher --> Bundled["应用私有 Codex"]
   Desktop --> H1["Session Host A"]
   Desktop --> H2["Session Host B"]
   H1 --> P1["ConPTY + Codex TUI"]
@@ -60,11 +61,11 @@ flowchart LR
 
 ## 职责边界
 
-### NSIS Setup
+### NSIS Setup 与 Launcher
 
-- 安装 Tauri 主程序、基线 Codex 和 Node.js LTS x64 备用安装介质；WebView2 使用 Tauri 安装器的 bootstrapper 行为。
-- 安装完成后运行无界面 runtime bootstrap：复用合格系统 Node.js/npm，缺失或版本不足时静默安装官方 Node.js LTS，再重新探测。
-- 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理。
+- NSIS 只安装稳定 Launcher、图标、Bootstrap 和许可证；不携带 Manager、Codex 或 Node payload。
+- Launcher 读取固定 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定源下载，校验大小/SHA-256、解包并 doctor 通过后才进入 staging。
+- 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理；准备完成后启动 Tauri Manager。
 
 ### Tauri 主窗口与嵌入终端
 
@@ -92,11 +93,11 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 更新状态为 `idle → checking → available → staging → verifying → waiting-instances → activating → ready`，失败为 `failed`。
 
-- 应用启动后及运行期间默认周期检查更新；自动检查发现新版本后自动下载、验证并暂存桌面 Setup 或 Codex。
-- 用户点击对应更新动作后才激活桌面 Setup 或 Codex `current`；该动作不自动结束活动 TUI。
+- 应用启动后及运行期间默认周期检查更新；自动检查发现新版本后由 Launcher 下载、验证并暂存完整 release 或独立 Installer。
+- 用户点击对应更新动作后才激活 Installer、Manager/Codex release；该动作不自动结束活动 TUI。
 - 任何正在启动或运行的 Session Host 都会阻止 Codex 和桌面更新激活。
 - 所有 TUI 归零后，控制进程重新验证 Codex staging 和 Node 条件，再切换 Codex `current`；提交前失败不改变旧版本。
-- 桌面程序更新通过已下载的新版 NSIS Setup 完成，不由运行中的控制窗口覆盖自身文件。
+- Launcher/Installer 更新通过已下载的新版 NSIS Setup 完成；普通 Manager/Codex release 更新由 Launcher 原子切换，不由运行中的控制窗口覆盖自身文件。Codex 的独立更新入口继续遵循用户明确点击和无活动会话才激活的边界。
 
 ## 实施准入
 
