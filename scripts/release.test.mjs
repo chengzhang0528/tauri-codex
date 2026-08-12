@@ -23,14 +23,25 @@ test("desktop packaging keeps the stable installer independent and thin", () => 
   const app = JSON.parse(readFileSync(new URL("../app/package.json", import.meta.url), "utf8"));
   const installer = JSON.parse(readFileSync(new URL("../app/installer-versions.json", import.meta.url), "utf8"));
   const tauri = JSON.parse(readFileSync(new URL("../app/src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(app.version, "0.1.3");
-  assert.equal(installer.installerVersion, "1.0.0");
+  assert.equal(app.version, "0.1.4");
+  assert.equal(installer.installerVersion, "1.0.1");
+  assert.equal(installer.releaseTag, "v0.1.4");
   assert.equal(tauri.version, installer.installerVersion);
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
     "../../THIRD_PARTY_NOTICES.md",
     "resources/bootstrap.json",
   ]);
+});
+
+test("launcher event subscriptions are covered by the default capability", () => {
+  const capability = JSON.parse(readFileSync(new URL("../app/src-tauri/capabilities/default.json", import.meta.url), "utf8"));
+  const runtime = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const launcher = readFileSync(new URL("../app/src/launcher.ts", import.meta.url), "utf8");
+  assert.match(runtime, /WebviewWindowBuilder::new\(app, "launcher"/);
+  assert.ok(capability.windows.includes("launcher"));
+  assert.ok(capability.permissions.includes("core:default"));
+  assert.match(launcher, /listen<LauncherStatus>\("launcher-status"/);
 });
 
 test("split launcher and manager are explicit build outputs", () => {

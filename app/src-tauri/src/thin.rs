@@ -930,8 +930,8 @@ mod tests {
 
     #[test]
     fn compares_installer_version_independently_from_manager_version() {
-        assert!(installer_is_newer("1.0.1").unwrap());
-        assert!(!installer_is_newer("1.0.0").unwrap());
+        assert!(installer_is_newer("1.0.2").unwrap());
+        assert!(!installer_is_newer("1.0.1").unwrap());
         assert!(!installer_is_newer("0.1.2").unwrap());
     }
 }
