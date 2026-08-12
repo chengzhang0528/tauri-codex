@@ -666,6 +666,17 @@ async function renderControl(): Promise<void> {
         call<CodexUpdateInfo>("check_codex_update"),
       ]);
       updateState = { release, codex, checking: true };
+      const staging: Promise<unknown>[] = [];
+      if (release.update_available) staging.push(call("stage_app_update"));
+      if (codex.update_available) {
+        staging.push(call("stage_codex_update", { version: codex.latest_version }));
+      }
+      if (staging.length > 0) {
+        const results = await Promise.allSettled(staging);
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+        await refreshSnapshot(false);
+        if (failures.length > 0 && !silent) setStatus(`自动更新暂存失败：${String(failures[0].reason)}`, "error");
+      }
       if (!silent) setStatus(`${release.tag_name ? `桌面 ${release.tag_name}` : "桌面暂无发布版本"}，Codex ${codex.latest_version}`, "success");
     } catch (error) {
       if (!silent) setStatus(String(error), "error");

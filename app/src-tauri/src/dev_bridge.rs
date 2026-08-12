@@ -231,6 +231,11 @@ fn dispatch(app: &AppHandle, state: &AppState, call: BridgeCall) -> Result<Value
             argument(&call.args, "digest")?,
             argument(&call.args, "releaseTag")?,
         )?),
+        "stage_app_update" => value(commands::stage_app_update(app.clone())?),
+        "stage_codex_update" => value(commands::stage_codex_update(
+            app.clone(),
+            argument(&call.args, "version")?,
+        )?),
         "install_codex_update" => value(commands::install_codex_update_inner(
             app,
             state,

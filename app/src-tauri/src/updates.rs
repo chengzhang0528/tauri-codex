@@ -95,6 +95,19 @@ pub fn download_release(
     let name = paths::safe_filename(filename);
     let target = directory.join(&name);
     let partial = directory.join(format!(".{name}.part"));
+    if target.is_file() {
+        match verify_download(&target, expected_size, expected_digest) {
+            Ok((bytes, digest)) => {
+                write_download_metadata(&directory, release_tag, &name, bytes, &digest)?;
+                return Ok(UpdateResult {
+                    version: release_tag.to_string(),
+                    path: target.to_string_lossy().to_string(),
+                    kind: "desktop-staged".to_string(),
+                });
+            }
+            Err(_) => fs::remove_file(&target).map_err(|error| error.to_string())?,
+        }
+    }
     let client = Client::builder()
         .user_agent("tauri-codex-updater")
         .connect_timeout(Duration::from_secs(15))
@@ -148,22 +161,70 @@ pub fn download_release(
         fs::remove_file(&target).map_err(|error| error.to_string())?;
     }
     fs::rename(&partial, &target).map_err(|error| error.to_string())?;
-    let metadata = serde_json::json!({
-        "release": release_tag,
-        "name": name,
-        "size": bytes,
-        "sha256": format!("{:x}", Sha256::digest(fs::read(&target).map_err(|error| error.to_string())?)),
-    });
-    fs::write(
-        directory.join(format!("{name}.json")),
-        serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&target).map_err(|error| error.to_string())?)
+    );
+    write_download_metadata(&directory, release_tag, &name, bytes, &digest)?;
     Ok(UpdateResult {
         version: release_tag.to_string(),
         path: target.to_string_lossy().to_string(),
         kind: "desktop-staged".to_string(),
     })
+}
+
+fn verify_download(
+    path: &Path,
+    expected_size: u64,
+    expected_digest: Option<&str>,
+) -> Result<(u64, String), String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    if expected_size != 0 && size != expected_size {
+        return Err(format!(
+            "更新资产大小不匹配：期望 {expected_size} 字节，收到 {size} 字节"
+        ));
+    }
+    let digest = format!("sha256:{:x}", hasher.finalize());
+    if let Some(expected) = expected_digest.filter(|value| !value.trim().is_empty()) {
+        let normalized = normalize_digest(expected)?;
+        if digest != normalized {
+            return Err(format!(
+                "更新资产 SHA-256 不匹配：期望 {normalized}，收到 {digest}"
+            ));
+        }
+    }
+    Ok((size, digest.trim_start_matches("sha256:").to_string()))
+}
+
+fn write_download_metadata(
+    directory: &Path,
+    release_tag: &str,
+    name: &str,
+    size: u64,
+    digest: &str,
+) -> Result<(), String> {
+    let metadata = serde_json::json!({
+        "release": release_tag,
+        "name": name,
+        "size": size,
+        "sha256": digest,
+    });
+    fs::write(
+        directory.join(format!("{name}.json")),
+        serde_json::to_vec_pretty(&metadata).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub fn check_codex_update(app: &AppHandle) -> Result<CodexUpdateInfo, String> {
@@ -200,6 +261,17 @@ pub fn stage_codex(app: &AppHandle, version: &str) -> Result<UpdateResult, Strin
     let mut npm = paths::npm_command()?;
     let root = paths::codex_root(app)?;
     let staging = root.join(format!("staging-{version}"));
+    if staging
+        .join("node_modules/@openai/codex/package.json")
+        .is_file()
+    {
+        smoke_codex(&node, app, &staging)?;
+        return Ok(UpdateResult {
+            version,
+            path: staging.to_string_lossy().to_string(),
+            kind: "codex-staged".to_string(),
+        });
+    }
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
     }
@@ -287,6 +359,32 @@ pub fn staged_app_updates(app: &AppHandle) -> Result<Vec<String>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+pub fn stage_latest_release(app: &AppHandle) -> Result<UpdateResult, String> {
+    let release = check_release()?;
+    if !release.update_available {
+        return Err("当前已是最新桌面版本".to_string());
+    }
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name.ends_with(".exe"))
+        .or_else(|| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name.ends_with(".msi"))
+        })
+        .ok_or_else(|| "最新 GitHub Release 未包含 Windows 安装资产".to_string())?;
+    download_release(
+        app,
+        &asset.download_url,
+        &asset.name,
+        asset.size,
+        asset.digest.as_deref(),
+        &release.tag_name,
+    )
 }
 
 pub fn launch_desktop_update(app: &AppHandle, path: &str) -> Result<(), String> {
@@ -455,7 +553,9 @@ fn normalize_digest(value: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_version, no_release_info};
+    use super::{is_newer_version, no_release_info, verify_download};
+    use sha2::{Digest, Sha256};
+    use std::fs;
 
     #[test]
     fn compares_github_and_npm_versions_without_downgrading() {
@@ -470,5 +570,30 @@ mod tests {
         assert!(release.tag_name.is_empty());
         assert!(!release.update_available);
         assert!(release.assets.is_empty());
+    }
+
+    #[test]
+    fn verifies_and_rejects_existing_staged_downloads() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-update-verify-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let candidate = root.join("candidate.exe");
+        fs::write(&candidate, b"verified candidate").unwrap();
+        let digest = format!("sha256:{:x}", Sha256::digest(b"verified candidate"));
+
+        let verified = verify_download(&candidate, 18, Some(&digest)).unwrap();
+        assert_eq!(verified.0, 18);
+        assert_eq!(verified.1, digest.trim_start_matches("sha256:"));
+        assert!(verify_download(&candidate, 17, Some(&digest)).is_err());
+        assert!(verify_download(
+            &candidate,
+            18,
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        )
+        .is_err());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

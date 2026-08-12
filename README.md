@@ -10,7 +10,7 @@ tauri-codex 是独立的社区项目，不是 OpenAI 官方产品，也不代表
 
 - 支持 Windows 10 22H2 x64 和 Windows 11 x64。
 - 不支持更早的 Windows、Windows ARM64、macOS 或 Linux；这些场景可以按[支持说明](SUPPORT.md)提交功能建议。
-- 应用可以检查 GitHub Releases 和内置 Codex 更新；下载、安装或应用更新均由用户明确点击触发，活动会话不会被自动中断。
+- 应用启动和运行期间会自动检查、下载、校验并暂存 GitHub Releases 与内置 Codex 更新；用户仍需明确点击激活更新，活动会话不会被自动中断。
 - Bug、兼容性问题和使用反馈通过 GitHub Issues 跟踪，提交入口和必要信息见[支持说明](SUPPORT.md)。
 - 安全漏洞不要公开披露，按[安全政策](SECURITY.md)报告。
 

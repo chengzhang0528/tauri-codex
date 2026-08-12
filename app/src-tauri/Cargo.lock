@@ -3471,7 +3471,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "portable-pty",
  "reqwest 0.12.28",

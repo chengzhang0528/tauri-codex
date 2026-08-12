@@ -581,6 +581,16 @@ pub fn download_app_update(
 }
 
 #[tauri::command]
+pub fn stage_app_update(app: AppHandle) -> Result<UpdateResult, String> {
+    updates::stage_latest_release(&app)
+}
+
+#[tauri::command]
+pub fn stage_codex_update(app: AppHandle, version: String) -> Result<UpdateResult, String> {
+    updates::stage_codex(&app, &version)
+}
+
+#[tauri::command]
 pub fn install_codex_update(
     app: AppHandle,
     state: State<'_, AppState>,

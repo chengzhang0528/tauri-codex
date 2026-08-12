@@ -106,6 +106,8 @@ pub fn run() {
             commands::check_app_update,
             commands::check_codex_update,
             commands::download_app_update,
+            commands::stage_app_update,
+            commands::stage_codex_update,
             commands::install_codex_update,
             commands::activate_codex_update,
             commands::apply_app_update

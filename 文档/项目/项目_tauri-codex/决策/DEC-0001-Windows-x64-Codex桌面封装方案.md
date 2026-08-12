@@ -92,8 +92,8 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 更新状态为 `idle → checking → available → staging → verifying → waiting-instances → activating → ready`，失败为 `failed`。
 
-- 应用启动后及运行期间默认周期检查更新；自动检查只读取版本状态，不下载、安装或应用更新。
-- 用户点击对应更新动作后才下载并验证桌面或 Codex 更新；该动作不自动结束活动 TUI。
+- 应用启动后及运行期间默认周期检查更新；自动检查发现新版本后自动下载、验证并暂存桌面 Setup 或 Codex。
+- 用户点击对应更新动作后才激活桌面 Setup 或 Codex `current`；该动作不自动结束活动 TUI。
 - 任何正在启动或运行的 Session Host 都会阻止 Codex 和桌面更新激活。
 - 所有 TUI 归零后，控制进程重新验证 Codex staging 和 Node 条件，再切换 Codex `current`；提交前失败不改变旧版本。
 - 桌面程序更新通过已下载的新版 NSIS Setup 完成，不由运行中的控制窗口覆盖自身文件。
