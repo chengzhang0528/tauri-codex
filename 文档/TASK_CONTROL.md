@@ -14,7 +14,7 @@ Depends On:
 
 | ID | 状态 | 执行类型 | 范围 | 候选/制品 | 下一可验证结果 | 入口 |
 |---|---|---|---|---|---|---|
-| ST-0001 | Blocked | SystemTest | tauri-codex / Windows x64 本机线上安装验收 | GitHubRelease:v0.1.3:373b0e3d475e913887b10ce23fa4e36bca305e8073ab083b6d958fc59434be1d | 管理员确认安装后完成已安装 Launcher、快捷方式和更新界面断言 | `文档/项目/项目_tauri-codex/推进中/ST-0001-v0.1.3-Windows安装验收.md` |
+| - | - | - | - | - | - | - |
 
 ## 维护规则
 
