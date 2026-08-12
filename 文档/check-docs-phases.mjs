@@ -6,6 +6,10 @@ const allowedStatuses = new Set(["InProgress", "Review", "Blocked"]);
 const nonUserAuthorityMarkers = new Set(["pending", "ci", "release-gate", "release gate", "automation", "tests-passed"]);
 export const WORK_CANDIDATE_BASES = new Set(["user-deferred", "verified-gap", "contract-obligation"]);
 
+export function allowsMissingActivityDirectory(isDirectory, kinds) {
+  return isDirectory && kinds.length > 0 && kinds.every((kind) => ACTIVITY_KINDS.has(kind));
+}
+
 export const TASK_EXECUTION_POLICY = new Map([
   ["TASK_SCOPE", "per-task"],
   ["TASK_AUTHORITY", "explicit-user-goal"],

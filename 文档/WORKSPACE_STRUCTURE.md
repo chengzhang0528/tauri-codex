@@ -35,6 +35,8 @@ Depends On:
 - `项目/项目_tauri-codex/运行/` -> `Runbook`
 - `项目/项目_tauri-codex/推进中/` -> `ChangePlan,SystemTestPlan,DeploymentPlan,Issue`
 
+仅承载 `ChangePlan`、`SystemTestPlan`、`DeploymentPlan`、`Issue` 的活动目录随活动文档共同创建和删除；没有活动任务时目录可以不存在。其他已声明正式文件和目录必须持续存在。
+
 首次出现有可靠依据的未承诺结果时，在本文件同一改动中声明 `WORK_CANDIDATES.md -> WorkInventory`；首次出现实际工作空间级设计、决策、运行或活动事实时，也在同一改动中声明其精确位置与 Kind。
 
 ## 文档状态协议

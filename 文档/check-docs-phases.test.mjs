@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  allowsMissingActivityDirectory,
   parseTaskControlRows,
   parseTaskExecutionPolicy,
   parseWorkCandidateRows,
@@ -34,6 +35,14 @@ const validPolicy = `
 test("parses and accepts the structured task execution policy", () => {
   assert.equal(parseTaskExecutionPolicy(validPolicy).policy.get("TASK_SCOPE"), "per-task");
   assert.deepEqual(validateTaskExecutionPolicy(validPolicy), []);
+});
+
+test("allows only lifecycle activity directories to be absent when empty", () => {
+  assert.equal(allowsMissingActivityDirectory(true, ["ChangePlan", "Issue"]), true);
+  assert.equal(allowsMissingActivityDirectory(true, ["CurrentDesign", "Decision"]), false);
+  assert.equal(allowsMissingActivityDirectory(true, ["ChangePlan", "Decision"]), false);
+  assert.equal(allowsMissingActivityDirectory(false, ["ChangePlan"]), false);
+  assert.equal(allowsMissingActivityDirectory(true, []), false);
 });
 
 test("rejects global scope, controlled-only system tests, automatic follow-ons, and broad reporting", () => {

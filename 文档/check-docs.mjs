@@ -8,6 +8,7 @@ import {
 import {
   ACTIVITY_KINDS,
   PLAN_KINDS,
+  allowsMissingActivityDirectory,
   parseTaskControlRows,
   parseWorkCandidateRows,
   validateActivityPhaseMetadata,
@@ -98,7 +99,8 @@ if (statusRules.size === 0) {
 for (const placement of placements) {
   if (placement.target !== docsRoot && !placement.target.startsWith(`${docsRoot}${path.sep}`)) {
     errors.push(`文档/WORKSPACE_STRUCTURE.md: governed path escapes 文档/ (${placement.declaredPath})`);
-  } else if (!fs.existsSync(placement.target)) {
+  } else if (!fs.existsSync(placement.target) &&
+      !allowsMissingActivityDirectory(placement.isDirectory, placement.kinds)) {
     errors.push(`文档/WORKSPACE_STRUCTURE.md: declared path does not exist (${placement.declaredPath})`);
   }
   if (placement.kinds.length === 0) {
@@ -377,6 +379,10 @@ for (const projectAgentPlacement of projectAgentPlacements) {
   const expectedDirectories = new Set(placements
     .filter((placement) => placement.isDirectory && path.dirname(placement.target) === projectRoot)
     .map((placement) => path.basename(placement.target)));
+  const optionalDirectories = new Set(placements
+    .filter((placement) => placement.isDirectory && path.dirname(placement.target) === projectRoot &&
+      allowsMissingActivityDirectory(placement.isDirectory, placement.kinds))
+    .map((placement) => path.basename(placement.target)));
   const actualDirectories = new Set(fs.readdirSync(projectRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name));
@@ -386,7 +392,7 @@ for (const projectAgentPlacement of projectAgentPlacements) {
     }
   }
   for (const directory of expectedDirectories) {
-    if (!actualDirectories.has(directory)) {
+    if (!actualDirectories.has(directory) && !optionalDirectories.has(directory)) {
       errors.push(`文档/WORKSPACE_STRUCTURE.md: declared project directory is missing (${directory})`);
     }
   }
