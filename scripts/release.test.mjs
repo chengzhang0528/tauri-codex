@@ -35,8 +35,10 @@ test("desktop packaging keeps the stable installer independent and thin", () => 
 
 test("split launcher and manager are explicit build outputs", () => {
   const vite = readFileSync(new URL("../app/vite.config.ts", import.meta.url), "utf8");
+  const cargo = readFileSync(new URL("../app/src-tauri/Cargo.toml", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("./windows-pipeline.mjs", import.meta.url), "utf8");
   assert.match(vite, /launcher:\s*resolve/);
+  assert.match(cargo, /^default-run\s*=\s*"tauri-codex"$/m);
   assert.match(pipeline, /--bin",\s*"tauri-codex-manager"/);
   assert.match(pipeline, /writeFileSync\(bootstrapResource[\s\S]*tauri",\s*"--",\s*"bundle"/);
 });

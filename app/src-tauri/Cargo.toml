@@ -6,6 +6,7 @@ authors = ["tauri-codex maintainers"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/chengzhang0528/tauri-codex"
 edition = "2021"
+default-run = "tauri-codex"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
