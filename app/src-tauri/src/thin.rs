@@ -3,7 +3,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -21,6 +21,9 @@ const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(30);
+const RELEASE_STATE_SCHEMA_VERSION: u32 = 1;
+const WINDOWS_MOVE_RETRY_ATTEMPTS: usize = 30;
+const WINDOWS_MOVE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Bootstrap {
@@ -74,6 +77,15 @@ pub struct Artifact {
     pub url: String,
     pub size: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CurrentReleaseState {
+    schema_version: u32,
+    current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,10 +156,12 @@ pub fn run_launcher_action() -> Result<bool, String> {
 pub fn launch_current_if_ready() -> Result<bool, String> {
     let root = launcher_data_root()?;
     fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    if current_release_version(&root)?.is_some()
-        && doctor_manager(&root.join("releases/current/manager")).is_ok()
-        && doctor_codex(&root.join("releases/current/codex")).is_ok()
-    {
+    if let Some(release) = current_release_path(&root)? {
+        if doctor_manager(&release.join("manager")).is_err()
+            || doctor_codex(&release.join("codex")).is_err()
+        {
+            return Ok(false);
+        }
         launch_current_manager(&root)?;
         return Ok(true);
     }
@@ -341,14 +355,16 @@ fn stage_installer(root: &Path, installer: &BootstrapInstaller) -> Result<String
 }
 
 pub fn current_release_version(root: &Path) -> Result<Option<String>, String> {
-    let file = root.join("releases").join("current").join("release.json");
-    if !file.is_file() {
+    Ok(read_current_release_state(root)?.map(|state| state.current))
+}
+
+pub fn current_release_path(root: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(state) = read_current_release_state(root)? else {
         return Ok(None);
-    }
-    let manifest: Manifest =
-        serde_json::from_slice(&fs::read(file).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("当前 release 元数据损坏：{error}"))?;
-    Ok(Some(manifest.version))
+    };
+    let release = installed_release_path(root, &state.current);
+    validate_installed_release(&release, &state.current)?;
+    Ok(Some(release))
 }
 
 pub fn staged_releases() -> Result<Vec<String>, String> {
@@ -597,44 +613,17 @@ fn activate_release(root: &Path, version: &str) -> Result<(), String> {
     if !staging.join(".ready").is_file() {
         return Err(format!("release {version} 尚未完整 stage"));
     }
-    doctor_manager(&staging.join("manager"))?;
-    doctor_codex(&staging.join("codex"))?;
-    let current = releases.join("current");
-    let previous = releases.join("previous");
-    if current.join("release.json").is_file() {
-        let active: Manifest = serde_json::from_slice(
-            &fs::read(current.join("release.json")).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        if active.version == version
-            && doctor_manager(&current.join("manager")).is_ok()
-            && doctor_codex(&current.join("codex")).is_ok()
-        {
-            fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
-            return Ok(());
-        }
-    }
-    if previous.exists() {
-        fs::remove_dir_all(&previous).map_err(|error| error.to_string())?;
-    }
-    if current.exists() {
-        fs::rename(&current, &previous).map_err(|error| error.to_string())?;
-    }
-    if let Err(error) = fs::rename(&staging, &current) {
-        if previous.exists() && !current.exists() {
-            let _ = fs::rename(&previous, &current);
-        }
-        return Err(error.to_string());
-    }
-    Ok(())
+    doctor_manager(&staging.join("manager"))
+        .map_err(|error| format!("激活前检查 Manager 失败：{error}"))?;
+    doctor_codex(&staging.join("codex"))
+        .map_err(|error| format!("激活前检查 Codex 失败：{error}"))?;
+    commit_staged_release(root, version)
 }
 
 fn launch_current_manager(root: &Path) -> Result<(), String> {
-    let manager = root
-        .join("releases")
-        .join("current")
-        .join("manager")
-        .join("tauri-codex-manager.exe");
+    let release =
+        current_release_path(root)?.ok_or_else(|| "尚无可运行的当前桌面 release".to_string())?;
+    let manager = release.join("manager").join("tauri-codex-manager.exe");
     doctor_manager(manager.parent().unwrap_or_else(|| Path::new(".")))?;
     let launcher = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(&manager)
@@ -642,6 +631,197 @@ fn launch_current_manager(root: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|error| format!("无法启动 Manager {}：{error}", manager.display()))?;
     Ok(())
+}
+
+fn commit_staged_release(root: &Path, version: &str) -> Result<(), String> {
+    validate_version(version)?;
+    let releases = root.join("releases");
+    let staging = releases.join(format!("staging-{version}"));
+    let installed = installed_release_path(root, version);
+
+    if installed.exists() {
+        validate_installed_release(&installed, version)?;
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .map_err(|error| format!("无法清理重复 staging {}：{error}", staging.display()))?;
+        }
+    } else {
+        if !staging.join(".ready").is_file() {
+            return Err(format!("release {version} 尚未完整 stage"));
+        }
+        move_release_directory(&staging, &installed).map_err(|error| {
+            format!(
+                "无法落位 release 目录 {} -> {}：{error}",
+                staging.display(),
+                installed.display()
+            )
+        })?;
+        validate_installed_release(&installed, version)?;
+    }
+
+    let current_state = read_current_release_state(root)?;
+    if current_state
+        .as_ref()
+        .is_some_and(|state| state.current == version)
+    {
+        return Ok(());
+    }
+    let previous = current_state.map(|state| state.current);
+    write_current_release_state(
+        root,
+        &CurrentReleaseState {
+            schema_version: RELEASE_STATE_SCHEMA_VERSION,
+            current: version.to_string(),
+            previous,
+        },
+    )
+}
+
+fn installed_release_path(root: &Path, version: &str) -> PathBuf {
+    root.join("releases").join(version)
+}
+
+fn validate_installed_release(path: &Path, version: &str) -> Result<(), String> {
+    if !path.join(".ready").is_file() {
+        return Err(format!(
+            "release {version} 缺少 ready 标记：{}",
+            path.display()
+        ));
+    }
+    let manifest_path = path.join("release.json");
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "无法读取 release 元数据 {}：{error}",
+                manifest_path.display()
+            )
+        })?)
+        .map_err(|error| format!("release 元数据损坏 {}：{error}", manifest_path.display()))?;
+    if manifest.version != version {
+        return Err(format!(
+            "release 目录版本不匹配：期望 {version}，实际 {}",
+            manifest.version
+        ));
+    }
+    Ok(())
+}
+
+fn read_current_release_state(root: &Path) -> Result<Option<CurrentReleaseState>, String> {
+    let path = root.join("releases").join("current.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let state: CurrentReleaseState = serde_json::from_slice(
+        &fs::read(&path)
+            .map_err(|error| format!("无法读取当前 release 状态 {}：{error}", path.display()))?,
+    )
+    .map_err(|error| format!("当前 release 状态损坏 {}：{error}", path.display()))?;
+    if state.schema_version != RELEASE_STATE_SCHEMA_VERSION {
+        return Err(format!(
+            "当前 release 状态版本不受支持：{}",
+            state.schema_version
+        ));
+    }
+    validate_version(&state.current)?;
+    if let Some(previous) = &state.previous {
+        validate_version(previous)?;
+    }
+    Ok(Some(state))
+}
+
+fn write_current_release_state(root: &Path, state: &CurrentReleaseState) -> Result<(), String> {
+    let releases = root.join("releases");
+    fs::create_dir_all(&releases)
+        .map_err(|error| format!("无法创建 release 状态目录 {}：{error}", releases.display()))?;
+    let target = releases.join("current.json");
+    let temporary = releases.join(format!(".current-{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let bytes = serde_json::to_vec_pretty(state)
+            .map_err(|error| format!("无法序列化当前 release 状态：{error}"))?;
+        let mut file = File::create(&temporary).map_err(|error| {
+            format!("无法创建临时 release 状态 {}：{error}", temporary.display())
+        })?;
+        file.write_all(&bytes).map_err(|error| {
+            format!("无法写入临时 release 状态 {}：{error}", temporary.display())
+        })?;
+        file.sync_all().map_err(|error| {
+            format!("无法刷新临时 release 状态 {}：{error}", temporary.display())
+        })?;
+        replace_file_atomic(&temporary, &target).map_err(|error| {
+            format!(
+                "无法提交当前 release 状态 {} -> {}：{error}",
+                temporary.display(),
+                target.display()
+            )
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn move_release_directory(source: &Path, target: &Path) -> io::Result<()> {
+    retry_windows_move(
+        || fs::rename(source, target),
+        |delay| std::thread::sleep(delay),
+    )
+}
+
+fn retry_windows_move<F, W>(mut operation: F, mut wait: W) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+    W: FnMut(Duration),
+{
+    let mut last_error = None;
+    for attempt in 0..WINDOWS_MOVE_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) if is_transient_windows_move_error(&error) => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+        if attempt + 1 < WINDOWS_MOVE_RETRY_ATTEMPTS {
+            wait(WINDOWS_MOVE_RETRY_DELAY);
+        }
+    }
+    Err(last_error.expect("retry loop always records a transient error"))
+}
+
+fn is_transient_windows_move_error(error: &io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(windows)]
+fn replace_file_atomic(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(io::Error::other)
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomic(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
 }
 
 fn launcher_data_root() -> Result<PathBuf, String> {
@@ -907,8 +1087,14 @@ fn validate_version(value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{installer_is_newer, validate_artifact, verify_digest, Artifact};
+    use super::{
+        commit_staged_release, current_release_path, current_release_version, installer_is_newer,
+        retry_windows_move, validate_artifact, verify_digest, Artifact, CurrentReleaseState,
+        WINDOWS_MOVE_RETRY_ATTEMPTS, WINDOWS_MOVE_RETRY_DELAY,
+    };
     use sha2::Digest;
+    use std::fs;
+    use std::io;
 
     #[test]
     fn rejects_non_github_artifact_sources() {
@@ -933,5 +1119,104 @@ mod tests {
         assert!(installer_is_newer("1.0.2").unwrap());
         assert!(!installer_is_newer("1.0.1").unwrap());
         assert!(!installer_is_newer("0.1.2").unwrap());
+    }
+
+    #[test]
+    fn retries_transient_windows_move_errors_until_success() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        retry_windows_move(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::from_raw_os_error(5))
+                } else {
+                    Ok(())
+                }
+            },
+            |delay| waits.push(delay),
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, vec![WINDOWS_MOVE_RETRY_DELAY; 2]);
+    }
+
+    #[test]
+    fn does_not_retry_permanent_move_errors() {
+        let mut attempts = 0;
+        let error = retry_windows_move(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(3))
+            },
+            |_| panic!("permanent move error must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.raw_os_error(), Some(3));
+    }
+
+    #[test]
+    fn returns_last_transient_error_after_retry_exhaustion() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let error = retry_windows_move(
+            || {
+                attempts += 1;
+                Err(io::Error::from_raw_os_error(32))
+            },
+            |_| waits += 1,
+        )
+        .unwrap_err();
+        assert_eq!(attempts, WINDOWS_MOVE_RETRY_ATTEMPTS);
+        assert_eq!(waits, WINDOWS_MOVE_RETRY_ATTEMPTS - 1);
+        assert_eq!(error.raw_os_error(), Some(32));
+    }
+
+    #[test]
+    fn activates_immutable_releases_through_an_atomic_current_state() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-release-state-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        write_staged_release(&root, "0.1.4");
+        commit_staged_release(&root, "0.1.4").unwrap();
+        assert_eq!(
+            current_release_version(&root).unwrap().as_deref(),
+            Some("0.1.4")
+        );
+        assert_eq!(
+            current_release_path(&root).unwrap().unwrap(),
+            root.join("releases/0.1.4")
+        );
+
+        write_staged_release(&root, "0.1.5");
+        commit_staged_release(&root, "0.1.5").unwrap();
+        let state: CurrentReleaseState =
+            serde_json::from_slice(&fs::read(root.join("releases/current.json")).unwrap()).unwrap();
+        assert_eq!(state.current, "0.1.5");
+        assert_eq!(state.previous.as_deref(), Some("0.1.4"));
+        assert!(root.join("releases/0.1.4/.ready").is_file());
+        assert!(root.join("releases/0.1.5/.ready").is_file());
+
+        write_staged_release(&root, "0.1.5");
+        commit_staged_release(&root, "0.1.5").unwrap();
+        let repeated: CurrentReleaseState =
+            serde_json::from_slice(&fs::read(root.join("releases/current.json")).unwrap()).unwrap();
+        assert_eq!(repeated.previous.as_deref(), Some("0.1.4"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_staged_release(root: &std::path::Path, version: &str) {
+        let staging = root.join("releases").join(format!("staging-{version}"));
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join(".ready"), b"ready\n").unwrap();
+        fs::write(
+            staging.join("release.json"),
+            format!(
+                r#"{{"schemaVersion":1,"product":"tauri-codex","version":"{version}","platform":"windows","architecture":"x86_64","components":[]}}"#
+            ),
+        )
+        .unwrap();
     }
 }

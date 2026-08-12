@@ -37,14 +37,19 @@ pub fn server_env_key(id: &str) -> String {
 
 pub fn current_codex_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let independently_managed = codex_root(app)?.join("current");
-    let managed = app_data_root(app)?.join("releases/current/codex");
+    let managed = crate::thin::current_release_path(&app_data_root(app)?)?
+        .map(|release| release.join("codex"));
     match (
         codex_version_in(&independently_managed),
-        codex_version_in(&managed),
+        managed.as_deref().and_then(codex_version_in),
     ) {
-        (Some(independent), Some(release)) if release > independent => Ok(managed),
+        (Some(independent), Some(release)) if release > independent => {
+            Ok(managed.expect("managed release path exists when its version was read"))
+        }
         (Some(_), _) => Ok(independently_managed),
-        (None, Some(_)) => Ok(managed),
+        (None, Some(_)) => {
+            Ok(managed.expect("managed release path exists when its version was read"))
+        }
         (None, None) => Ok(independently_managed),
     }
 }
