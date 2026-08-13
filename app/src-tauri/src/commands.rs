@@ -1,6 +1,6 @@
 use crate::model::{
     AppSnapshot, CodexSettings, CodexUpdateInfo, ServerProfile, ServerSummary, TerminalInstance,
-    UpdateResult,
+    UpdateResult, DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
 };
 use crate::paths;
 use crate::sessions::SessionManager;
@@ -43,6 +43,7 @@ pub struct RenderedRequest {
 pub struct SaveCodexSettingsRequest {
     pub model: String,
     pub model_reasoning_effort: String,
+    pub model_auto_compact_token_limit: u64,
     pub execution_mode: String,
     pub web_search: String,
     pub personality: String,
@@ -107,8 +108,14 @@ fn read_config_toml(app: &AppHandle) -> Result<String, String> {
     if config_file.is_file() {
         fs::read_to_string(config_file).map_err(|error| error.to_string())
     } else {
-        Ok("# Codex configuration\n".to_string())
+        Ok(default_config_toml())
     }
+}
+
+fn default_config_toml() -> String {
+    format!(
+        "# Codex configuration\n# Automatic history compaction threshold (tokens).\nmodel_auto_compact_token_limit = {DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT}\n"
+    )
 }
 
 #[tauri::command]
@@ -177,7 +184,8 @@ pub(crate) fn sync_server_profiles(app: &AppHandle) -> Result<(), String> {
     let servers = load_servers(app)?;
     save_servers(app, &servers)?;
     let current = read_config_toml(app)?;
-    let updated = remove_legacy_server_profiles(&current)?;
+    let updated = ensure_default_codex_settings(&current)?;
+    let updated = remove_legacy_server_profiles(&updated)?;
     write_config_toml(app, &updated)?;
     sync_server_profile_files(app, &servers)
 }
@@ -213,7 +221,8 @@ pub fn save_config(app: AppHandle, config_toml: String) -> Result<CodexSettings,
     config_toml
         .parse::<toml::Value>()
         .map_err(|error| format!("TOML 校验失败：{error}"))?;
-    let updated = remove_legacy_server_profiles(&config_toml)?;
+    let updated = ensure_default_codex_settings(&config_toml)?;
+    let updated = remove_legacy_server_profiles(&updated)?;
     write_config_toml(&app, &updated)?;
     sync_server_profile_files(&app, &load_servers(&app)?)?;
     Ok(parse_codex_settings(&updated))
@@ -331,6 +340,8 @@ fn parse_codex_settings(config_toml: &str) -> CodexSettings {
     CodexSettings {
         model: string_value(&value, "model"),
         model_reasoning_effort: string_value(&value, "model_reasoning_effort"),
+        model_auto_compact_token_limit: integer_value(&value, "model_auto_compact_token_limit")
+            .unwrap_or(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT),
         execution_mode: execution_mode.to_string(),
         web_search: string_value(&value, "web_search"),
         personality: string_value(&value, "personality"),
@@ -346,6 +357,30 @@ fn string_value(value: &toml::Value, key: &str) -> String {
         .to_string()
 }
 
+fn integer_value(value: &toml::Value, key: &str) -> Option<u64> {
+    value
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .and_then(|number| u64::try_from(number).ok())
+}
+
+fn ensure_default_codex_settings(config_toml: &str) -> Result<String, String> {
+    let mut document = config_toml
+        .parse::<toml_edit::Document>()
+        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    if document.get("model_auto_compact_token_limit").is_none() {
+        document.insert(
+            "model_auto_compact_token_limit",
+            toml_edit::value(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT as i64),
+        );
+    }
+    let updated = document.to_string();
+    updated
+        .parse::<toml::Value>()
+        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    Ok(updated)
+}
+
 fn merge_codex_settings(
     config_toml: &str,
     settings: &SaveCodexSettingsRequest,
@@ -353,6 +388,20 @@ fn merge_codex_settings(
     let mut document = config_toml
         .parse::<toml_edit::Document>()
         .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    if document.get("model_auto_compact_token_limit").is_none() {
+        document.insert(
+            "model_auto_compact_token_limit",
+            toml_edit::value(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT as i64),
+        );
+    }
+    if settings.model_auto_compact_token_limit == 0 {
+        return Err("自动压缩阈值必须大于 0 tokens".to_string());
+    }
+    set_integer(
+        &mut document,
+        "model_auto_compact_token_limit",
+        settings.model_auto_compact_token_limit,
+    )?;
     set_string(&mut document, "model", &settings.model);
     set_choice(
         &mut document,
@@ -406,6 +455,27 @@ fn set_string(document: &mut toml_edit::Document, key: &str, requested: &str) {
     } else {
         set_document_string(document, key, requested);
     }
+}
+
+fn set_integer(
+    document: &mut toml_edit::Document,
+    key: &str,
+    requested: u64,
+) -> Result<(), String> {
+    let requested =
+        i64::try_from(requested).map_err(|_| format!("{key} 超出 Codex 支持的整数范围"))?;
+    if let Some(existing) = document
+        .get_mut(key)
+        .and_then(toml_edit::Item::as_value_mut)
+    {
+        let decor = existing.decor().clone();
+        let mut replacement = toml_edit::Value::from(requested);
+        *replacement.decor_mut() = decor;
+        *existing = replacement;
+    } else {
+        document.insert(key, toml_edit::value(requested));
+    }
+    Ok(())
 }
 
 fn set_choice(
@@ -656,11 +726,12 @@ fn active_instance_count(state: &AppState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_server_profile, merge_codex_settings, normalize_server_defaults,
-        parse_codex_settings, parse_servers, remove_legacy_server_profiles, selected_server_id,
-        set_server_default, SaveCodexSettingsRequest, StartTerminalRequest,
+        build_server_profile, default_config_toml, ensure_default_codex_settings,
+        merge_codex_settings, normalize_server_defaults, parse_codex_settings, parse_servers,
+        remove_legacy_server_profiles, selected_server_id, set_server_default,
+        SaveCodexSettingsRequest, StartTerminalRequest,
     };
-    use crate::model::ServerProfile;
+    use crate::model::{ServerProfile, DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT};
 
     #[test]
     fn resume_keeps_the_selected_model_instance() {
@@ -803,6 +874,7 @@ mod tests {
         let settings = parse_codex_settings(
             r#"model = "gpt-5.6"
 model_reasoning_effort = "high"
+model_auto_compact_token_limit = 273000
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 web_search = "cached"
@@ -812,10 +884,38 @@ personality = "pragmatic"
 
         assert_eq!(settings.model, "gpt-5.6");
         assert_eq!(settings.model_reasoning_effort, "high");
+        assert_eq!(settings.model_auto_compact_token_limit, 273_000);
         assert_eq!(settings.execution_mode, "standard");
         assert_eq!(settings.web_search, "cached");
         assert_eq!(settings.personality, "pragmatic");
         assert_eq!(settings.config_error, None);
+    }
+
+    #[test]
+    fn new_config_contains_the_product_auto_compact_default() {
+        let config = default_config_toml();
+        let value = config.parse::<toml::Value>().expect("valid TOML");
+
+        assert_eq!(
+            value["model_auto_compact_token_limit"].as_integer(),
+            Some(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT as i64)
+        );
+    }
+
+    #[test]
+    fn missing_auto_compact_default_is_added_without_losing_user_content() {
+        let original =
+            "# Keep this comment\nmodel = \"user-model\"\n\n[features]\nmulti_agent = true\n";
+        let updated = ensure_default_codex_settings(original).expect("add default setting");
+        let value = updated.parse::<toml::Value>().expect("valid TOML");
+
+        assert!(updated.contains("# Keep this comment"));
+        assert_eq!(value["model"].as_str(), Some("user-model"));
+        assert_eq!(value["features"]["multi_agent"].as_bool(), Some(true));
+        assert_eq!(
+            value["model_auto_compact_token_limit"].as_integer(),
+            Some(DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT as i64)
+        );
     }
 
     #[test]
@@ -831,6 +931,7 @@ multi_agent = true
             &SaveCodexSettingsRequest {
                 model: "new-model".to_string(),
                 model_reasoning_effort: "high".to_string(),
+                model_auto_compact_token_limit: 273_000,
                 execution_mode: "automatic".to_string(),
                 web_search: "live".to_string(),
                 personality: "friendly".to_string(),
@@ -843,6 +944,28 @@ multi_agent = true
         assert_eq!(value["model"].as_str(), Some("new-model"));
         assert_eq!(value["approval_policy"].as_str(), Some("never"));
         assert_eq!(value["sandbox_mode"].as_str(), Some("danger-full-access"));
+        assert_eq!(
+            value["model_auto_compact_token_limit"].as_integer(),
+            Some(273_000)
+        );
         assert_eq!(value["features"]["multi_agent"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn guided_save_rejects_a_zero_auto_compact_limit() {
+        let error = merge_codex_settings(
+            "# Existing config\n",
+            &SaveCodexSettingsRequest {
+                model: String::new(),
+                model_reasoning_effort: String::new(),
+                model_auto_compact_token_limit: 0,
+                execution_mode: "default".to_string(),
+                web_search: String::new(),
+                personality: String::new(),
+            },
+        )
+        .expect_err("reject zero threshold");
+
+        assert_eq!(error, "自动压缩阈值必须大于 0 tokens");
     }
 }

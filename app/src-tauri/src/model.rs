@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT: u64 = 272_000;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CodexSettings {
     pub model: String,
     pub model_reasoning_effort: String,
+    pub model_auto_compact_token_limit: u64,
     pub execution_mode: String,
     pub web_search: String,
     pub personality: String,
@@ -15,6 +18,7 @@ impl Default for CodexSettings {
         Self {
             model: String::new(),
             model_reasoning_effort: String::new(),
+            model_auto_compact_token_limit: DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
             execution_mode: "default".to_string(),
             web_search: String::new(),
             personality: String::new(),

@@ -42,6 +42,7 @@ type TerminalInstance = {
 type CodexSettings = {
   model: string;
   model_reasoning_effort: string;
+  model_auto_compact_token_limit: number;
   execution_mode: string;
   web_search: string;
   personality: string;
@@ -1051,6 +1052,7 @@ function renderSettingsView(snapshot: Snapshot): void {
               { value: "pragmatic", label: "务实" },
               { value: "none", label: "无指定风格" },
             ])}</select></label>
+            <label class="field guided-field"><span>自动压缩阈值</span><input id="setting-auto-compact" type="number" min="1000" step="1000" value="${settings.model_auto_compact_token_limit}" /><small>达到 ${settings.model_auto_compact_token_limit.toLocaleString("zh-CN")} tokens 后自动压缩历史记录</small></label>
           </div>
           <fieldset class="execution-field"><legend>执行方式</legend><div class="segmented-control">${renderExecutionOptions(settings.execution_mode)}</div></fieldset>
           <div class="advanced-actions"><button class="button button-primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></div>
@@ -1100,6 +1102,7 @@ function bindSettingsView(
     const settings = {
       model: valueOf("setting-model"),
       model_reasoning_effort: valueOfSelect("setting-reasoning"),
+      model_auto_compact_token_limit: Number(document.querySelector<HTMLInputElement>("#setting-auto-compact")?.value ?? 0),
       execution_mode: execution,
       web_search: valueOfSelect("setting-web-search"),
       personality: valueOfSelect("setting-personality"),
