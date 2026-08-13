@@ -269,7 +269,7 @@ async function renderControl(): Promise<void> {
         <nav class="primary-nav" aria-label="主导航">
           <button class="nav-item" data-view="sessions"><i data-lucide="terminal"></i><span>会话</span><span class="nav-count" id="nav-session-count"></span></button>
         </nav>
-        <section class="session-tree-panel" id="session-tree-panel" aria-label="运行中的会话" hidden></section>
+        <section class="session-tree-panel" id="session-tree-panel" aria-label="工作目录和运行中的会话"></section>
         <nav class="primary-nav utility-nav" aria-label="配置导航">
           <button class="nav-item" data-view="api"><i data-lucide="server"></i><span>模型实例</span></button>
           <button class="nav-item" data-view="settings"><i data-lucide="settings"></i><span>设置</span></button>
@@ -325,64 +325,94 @@ async function renderControl(): Promise<void> {
   const renderSessionTree = (): void => {
     const panel = document.querySelector<HTMLElement>("#session-tree-panel");
     if (!panel) return;
-    panel.hidden = snapshot.terminals.length === 0;
-    if (panel.hidden) {
-      panel.innerHTML = "";
-      return;
-    }
     const groups = new Map<string, { workdir: string; sessions: TerminalInstance[] }>();
+    for (const workdir of recentWorkdirs) {
+      groups.set(workdirKey(workdir), { workdir, sessions: [] });
+    }
     for (const terminal of snapshot.terminals) {
       const key = workdirKey(terminal.workdir);
       const group = groups.get(key) ?? { workdir: terminal.workdir, sessions: [] };
       group.sessions.push(terminal);
       groups.set(key, group);
     }
-    const directories = [...groups.entries()].sort(([, left], [, right]) => (
-      workdirLabel(left.workdir).localeCompare(workdirLabel(right.workdir))
-    ));
+    const directories = [...groups.entries()];
     panel.innerHTML = `
-      <div class="tree-heading"><span>会话目录</span><span>${snapshot.terminals.length}</span></div>
-      <div class="workspace-tree">
+      <div class="tree-heading">
+        <span>工作目录</span>
+        <span class="tree-heading-meta">${directories.length} 个目录 · ${snapshot.terminals.length} 个运行中</span>
+        <button class="icon-button tree-add-workdir" type="button" title="添加工作目录" aria-label="添加工作目录"><i data-lucide="plus"></i></button>
+      </div>
+      ${directories.length > 0 ? `<div class="workspace-tree">
         ${directories.map(([key, { workdir, sessions }]) => `
-          <details class="workspace-node" data-workdir="${escapeHtml(key)}" ${collapsedWorkdirs.has(key) ? "" : "open"}>
-            <summary title="${escapeHtml(workdir)}">
-              <i class="tree-disclosure" data-lucide="chevron-right"></i>
-              <i class="tree-folder" data-lucide="folder"></i>
-              <span class="workspace-copy"><strong>${escapeHtml(workdirLabel(workdir))}</strong><small>${escapeHtml(workdir)}</small></span>
-              <span class="workspace-count">${sessions.length}</span>
-            </summary>
-            <div class="tree-session-list">
-              ${sessions.map((terminal) => {
-                const server = snapshot.servers.find((item) => item.id === terminal.server_id);
-                let ordinal = terminalOrdinals.get(terminal.id);
-                if (ordinal === undefined) {
-                  ordinal = (nextOrdinalByWorkdir.get(key) ?? 0) + 1;
-                  nextOrdinalByWorkdir.set(key, ordinal);
-                  terminalOrdinals.set(terminal.id, ordinal);
-                }
-                const label = terminal.resume ? `恢复会话 ${ordinal}` : `会话 ${ordinal}`;
-                const detail = server?.name || "实例已删除";
-                return `
-                  <button class="tree-session is-running ${terminal.id === activeTerminalId ? "is-selected" : ""}" type="button" data-terminal-id="${escapeHtml(terminal.id)}" aria-pressed="${terminal.id === activeTerminalId}" title="${escapeHtml(label)} · ${escapeHtml(workdir)}">
-                    <span class="tree-session-indicator" data-status="${escapeHtml(terminal.status)}"></span>
-                    <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></span>
-                  </button>`;
-              }).join("")}
+          <div class="workspace-node-shell ${workdirKey(draftWorkdir) === key ? "is-selected" : ""}" data-workdir="${escapeHtml(key)}">
+            <details class="workspace-node" ${collapsedWorkdirs.has(key) ? "" : "open"}>
+              <summary class="workspace-summary ${workdirKey(draftWorkdir) === key ? "is-selected" : ""}" data-workdir="${escapeHtml(workdir)}" title="${escapeHtml(workdir)}">
+                <i class="tree-disclosure" data-lucide="chevron-right"></i>
+                <i class="tree-folder" data-lucide="folder"></i>
+                <span class="workspace-copy"><strong>${escapeHtml(workdirLabel(workdir))}</strong><small>${escapeHtml(workdir)}</small></span>
+                <span class="workspace-count">${sessions.length}</span>
+              </summary>
+              <div class="tree-session-list">
+                ${sessions.length > 0 ? sessions.map((terminal) => {
+                  const server = snapshot.servers.find((item) => item.id === terminal.server_id);
+                  let ordinal = terminalOrdinals.get(terminal.id);
+                  if (ordinal === undefined) {
+                    ordinal = (nextOrdinalByWorkdir.get(key) ?? 0) + 1;
+                    nextOrdinalByWorkdir.set(key, ordinal);
+                    terminalOrdinals.set(terminal.id, ordinal);
+                  }
+                  const label = terminal.resume ? `恢复会话 ${ordinal}` : `会话 ${ordinal}`;
+                  const detail = server?.name || "实例已删除";
+                  return `
+                    <button class="tree-session is-running ${terminal.id === activeTerminalId ? "is-selected" : ""}" type="button" data-terminal-id="${escapeHtml(terminal.id)}" aria-pressed="${terminal.id === activeTerminalId}" title="${escapeHtml(label)} · ${escapeHtml(workdir)}">
+                      <span class="tree-session-indicator" data-status="${escapeHtml(terminal.status)}"></span>
+                      <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></span>
+                    </button>`;
+                }).join("") : '<div class="tree-state"><span>暂无运行中的会话</span></div>'}
+              </div>
+            </details>
+            <div class="workspace-node-actions">
+              <button class="icon-button tree-new-session" type="button" data-workdir="${escapeHtml(workdir)}" title="在此目录新建会话" aria-label="在 ${escapeHtml(workdirLabel(workdir))} 新建会话"><i data-lucide="plus"></i></button>
+              ${recentWorkdirs.some((item) => workdirKey(item) === key) ? `<button class="icon-button tree-remove-workdir" type="button" data-workdir="${escapeHtml(workdir)}" title="从列表移除" aria-label="移除 ${escapeHtml(workdirLabel(workdir))}"><i data-lucide="x"></i></button>` : ""}
             </div>
-          </details>`).join("")}
-      </div>`;
+          </div>`).join("")}
+      </div>` : '<div class="tree-state tree-empty"><i data-lucide="folder"></i><strong>还没有工作目录</strong><button class="button button-secondary tree-add-workdir" type="button">添加工作目录</button></div>'}`;
     panel.querySelectorAll<HTMLDetailsElement>(".workspace-node").forEach((node) => {
       node.addEventListener("toggle", () => {
-        const workdir = node.dataset.workdir;
+        const workdir = node.closest<HTMLElement>(".workspace-node-shell")?.dataset.workdir;
         if (!workdir) return;
         if (node.open) collapsedWorkdirs.delete(workdir);
         else collapsedWorkdirs.add(workdir);
+      });
+    });
+    panel.querySelectorAll<HTMLElement>(".workspace-summary").forEach((summary) => {
+      summary.addEventListener("click", () => {
+        const workdir = summary.dataset.workdir;
+        if (!workdir) return;
+        selectWorkdir(workdir);
       });
     });
     panel.querySelectorAll<HTMLButtonElement>(".tree-session").forEach((button) => {
       button.addEventListener("click", () => {
         const instance = snapshot.terminals.find((terminal) => terminal.id === button.dataset.terminalId);
         if (instance) void showTerminal(instance);
+      });
+    });
+    panel.querySelectorAll<HTMLButtonElement>(".tree-add-workdir").forEach((button) => {
+      button.addEventListener("click", () => void chooseWorkdir());
+    });
+    panel.querySelectorAll<HTMLButtonElement>(".tree-new-session").forEach((button) => {
+      button.addEventListener("click", () => {
+        const workdir = button.dataset.workdir;
+        if (!workdir) return;
+        selectWorkdir(workdir);
+        window.requestAnimationFrame(() => document.querySelector<HTMLSelectElement>("#session-server")?.focus());
+      });
+    });
+    panel.querySelectorAll<HTMLButtonElement>(".tree-remove-workdir").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (button.dataset.workdir) removeWorkdir(button.dataset.workdir);
       });
     });
     mountIcons();
@@ -638,6 +668,7 @@ async function renderControl(): Promise<void> {
       draftWorkdir = normalizeWorkdir(selected);
       recentWorkdirs = dedupeWorkdirs([draftWorkdir, ...recentWorkdirs]);
       saveWorkdirs(recentWorkdirs, draftWorkdir);
+      renderSessionTree();
       renderSessionPage();
     } catch (error) {
       setStatus(`无法选择工作目录：${String(error)}`, "error");
@@ -646,6 +677,13 @@ async function renderControl(): Promise<void> {
   const selectWorkdir = (workdir: string): void => {
     draftWorkdir = normalizeWorkdir(workdir);
     saveWorkdirs(recentWorkdirs, draftWorkdir);
+    if (activeTerminalId !== null || activeView !== "sessions") {
+      showControl("sessions");
+      return;
+    }
+    document.querySelectorAll<HTMLElement>(".workspace-summary").forEach((summary) => {
+      summary.classList.toggle("is-selected", workdirKey(summary.dataset.workdir ?? "") === workdirKey(draftWorkdir));
+    });
     renderSessionPage();
   };
   const removeWorkdir = (workdir: string): void => {
@@ -653,6 +691,7 @@ async function renderControl(): Promise<void> {
     recentWorkdirs = recentWorkdirs.filter((item) => workdirKey(item) !== removedKey);
     if (workdirKey(draftWorkdir) === removedKey) draftWorkdir = recentWorkdirs[0] ?? "";
     saveWorkdirs(recentWorkdirs, draftWorkdir);
+    renderSessionTree();
     renderSessionPage();
     setStatus("已从工作目录列表移除", "success");
   };
@@ -687,12 +726,11 @@ async function renderControl(): Promise<void> {
     }
   };
   const renderSessionPage = (): void => {
-    renderSessionsView(snapshot, draftWorkdir, draftServerId, recentWorkdirs);
+    renderSessionsView(snapshot, draftWorkdir, draftServerId);
     bindSessionsView({
+      workdir: draftWorkdir,
       launch: (workdir, serverId, resume) => void launchSession(workdir, serverId, resume),
       chooseWorkdir: () => void chooseWorkdir(),
-      selectWorkdir,
-      removeWorkdir,
       selectServer: (serverId) => { draftServerId = serverId; },
     });
     mountIcons();
@@ -716,7 +754,11 @@ async function renderControl(): Promise<void> {
       actions.innerHTML = '<button class="icon-button" id="header-new-session" title="新会话" aria-label="新会话"><i data-lucide="plus"></i></button>';
       renderSessionPage();
       document.querySelector<HTMLButtonElement>("#header-new-session")?.addEventListener("click", () => {
-        void chooseWorkdir();
+        if (draftWorkdir) {
+          document.querySelector<HTMLSelectElement>("#session-server")?.focus();
+        } else {
+          void chooseWorkdir();
+        }
       });
     } else if (view === "api") {
       title.textContent = "模型实例";
@@ -776,7 +818,7 @@ async function renderControl(): Promise<void> {
   window.setInterval(() => void checkUpdates(true), 6 * 60 * 60 * 1000);
 }
 
-function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServerId: string, recentWorkdirs: string[]): void {
+function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServerId: string): void {
   const content = document.querySelector<HTMLElement>("#view-content");
   if (!content) return;
   const options = snapshot.servers
@@ -784,16 +826,6 @@ function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServe
     .join("");
   const serverOptions = options || '<option value="" disabled>请先创建模型实例</option>';
   const launchDisabled = snapshot.servers.length === 0 || !draftWorkdir ? " disabled" : "";
-  const workdirRows = recentWorkdirs.length > 0
-    ? recentWorkdirs.map((workdir) => `
-      <div class="workdir-row ${workdirKey(workdir) === workdirKey(draftWorkdir) ? "is-selected" : ""}">
-        <button class="workdir-select" type="button" data-workdir="${escapeHtml(workdir)}" aria-current="${workdirKey(workdir) === workdirKey(draftWorkdir) ? "true" : "false"}" title="${escapeHtml(workdir)}">
-          <i data-lucide="folder"></i>
-          <span><strong>${escapeHtml(workdirLabel(workdir))}</strong><small>${escapeHtml(workdir)}</small></span>
-        </button>
-        <button class="icon-button workdir-remove" type="button" data-workdir="${escapeHtml(workdir)}" title="从列表移除" aria-label="移除 ${escapeHtml(workdirLabel(workdir))}"><i data-lucide="x"></i></button>
-      </div>`).join("")
-    : '<div class="workdir-empty"><i data-lucide="folder"></i><strong>尚未选择工作目录</strong><button class="button button-secondary choose-workdir" type="button">选择目录</button></div>';
   const activeWorkdir = draftWorkdir
     ? `<div class="current-workdir">
         <span class="workdir-symbol"><i data-lucide="folder"></i></span>
@@ -807,23 +839,17 @@ function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServe
       </div>`;
   content.innerHTML = `
     <div class="session-home">
-      <div class="workspace-manager">
-        <section class="workdir-index">
-          <div class="workdir-index-heading"><h2>工作目录</h2><span>${recentWorkdirs.length}</span><button class="icon-button choose-workdir" type="button" title="添加工作目录" aria-label="添加工作目录"><i data-lucide="plus"></i></button></div>
-          <div class="workdir-list">${workdirRows}</div>
-        </section>
-        <form class="session-launch-form" id="session-launch-form">
-          <div class="session-launch-heading"><h2>开始会话</h2></div>
-          ${activeWorkdir}
-          <div class="session-launch-controls">
-            <label class="field"><span>模型实例</span><select id="session-server" required>${serverOptions}</select></label>
-            <div class="session-launch-buttons">
-              <button class="button button-primary session-launch-action" type="submit"${launchDisabled}><i data-lucide="play"></i><span>新会话</span></button>
-              <button class="button button-secondary session-launch-action" id="resume-session" type="button"${launchDisabled}><i data-lucide="rotate-ccw"></i><span>恢复会话</span></button>
-            </div>
+      <form class="session-launch-form" id="session-launch-form">
+        <div class="session-launch-heading"><h2>开始会话</h2></div>
+        ${activeWorkdir}
+        <div class="session-launch-controls">
+          <label class="field"><span>模型实例</span><select id="session-server" required>${serverOptions}</select></label>
+          <div class="session-launch-buttons">
+            <button class="button button-primary session-launch-action" type="submit"${launchDisabled}><i data-lucide="play"></i><span>新会话</span></button>
+            <button class="button button-secondary session-launch-action" id="resume-session" type="button"${launchDisabled}><i data-lucide="rotate-ccw"></i><span>恢复会话</span></button>
           </div>
-        </form>
-      </div>
+        </div>
+      </form>
     </div>`;
   const server = document.querySelector<HTMLSelectElement>("#session-server");
   if (server) server.value = snapshot.servers.some((item) => item.id === draftServerId)
@@ -832,15 +858,12 @@ function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServe
 }
 
 function bindSessionsView(handlers: {
+  workdir: string;
   launch: (workdir: string, serverId: string, resume: boolean) => void;
   chooseWorkdir: () => void;
-  selectWorkdir: (workdir: string) => void;
-  removeWorkdir: (workdir: string) => void;
   selectServer: (serverId: string) => void;
 }): void {
-  const currentWorkdir = document.querySelector<HTMLButtonElement>(".workdir-select[aria-current='true']")?.dataset.workdir
-    ?? document.querySelector<HTMLElement>(".workdir-row.is-selected .workdir-select")?.dataset.workdir
-    ?? "";
+  const currentWorkdir = handlers.workdir;
   const launch = (resume: boolean): void => handlers.launch(currentWorkdir, valueOfSelect("session-server"), resume);
   document.querySelector<HTMLFormElement>("#session-launch-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -851,12 +874,6 @@ function bindSessionsView(handlers: {
     handlers.selectServer((event.currentTarget as HTMLSelectElement).value);
   });
   document.querySelectorAll<HTMLButtonElement>(".choose-workdir").forEach((button) => button.addEventListener("click", handlers.chooseWorkdir));
-  document.querySelectorAll<HTMLButtonElement>(".workdir-select").forEach((button) => button.addEventListener("click", () => {
-    if (button.dataset.workdir) handlers.selectWorkdir(button.dataset.workdir);
-  }));
-  document.querySelectorAll<HTMLButtonElement>(".workdir-remove").forEach((button) => button.addEventListener("click", () => {
-    if (button.dataset.workdir) handlers.removeWorkdir(button.dataset.workdir);
-  }));
 }
 
 function renderApiView(snapshot: Snapshot): void {
