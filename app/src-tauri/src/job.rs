@@ -1,7 +1,9 @@
+use std::ffi::OsStr;
 #[cfg(windows)]
 use std::mem::size_of;
+use std::process::Command;
 #[cfg(windows)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -13,6 +15,19 @@ use windows::Win32::System::JobObjects::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub fn background_command<S: AsRef<OsStr>>(program: S) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
 
 #[cfg(windows)]
 pub struct JobObject(HANDLE);
@@ -56,7 +71,7 @@ impl JobObject {
 
 #[cfg(windows)]
 pub fn terminate_process_tree(pid: u32) {
-    let _ = Command::new("taskkill.exe")
+    let _ = background_command("taskkill.exe")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -87,3 +102,37 @@ impl JobObject {
 
 #[cfg(not(windows))]
 pub fn terminate_process_tree(_pid: u32) {}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::background_command;
+
+    #[test]
+    fn background_commands_still_capture_output() {
+        let output = background_command("cmd.exe")
+            .args(["/D", "/C", "echo", "background-output"])
+            .output()
+            .expect("run background command");
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "background-output"
+        );
+    }
+
+    #[test]
+    fn background_commands_do_not_receive_a_console_window() {
+        let status = background_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Add-Type 'using System; using System.Runtime.InteropServices; public static class ConsoleWindow { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); }'; if ([ConsoleWindow]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 1 }",
+            ])
+            .status()
+            .expect("inspect background console window");
+
+        assert!(status.success());
+    }
+}

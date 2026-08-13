@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -113,16 +113,11 @@ impl SessionManager {
         };
 
         let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
-        let mut host = Command::new(current_exe);
+        let mut host = crate::job::background_command(current_exe);
         host.arg("--session-host")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            host.creation_flags(0x08000000);
-        }
         let mut host = host
             .spawn()
             .map_err(|error| format!("无法启动 Session Host：{error}"))?;

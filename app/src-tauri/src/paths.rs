@@ -128,7 +128,7 @@ pub fn system_npm() -> Result<PathBuf, String> {
                 node.parent().unwrap_or_else(|| Path::new(".")).display()
             )
         })?;
-        let output = Command::new(&node)
+        let output = crate::job::background_command(&node)
             .arg(&cli)
             .arg("--version")
             .output()
@@ -151,7 +151,7 @@ pub fn system_npm() -> Result<PathBuf, String> {
 }
 
 pub fn validate_node(node: &Path) -> Result<(), String> {
-    let output = Command::new(node)
+    let output = crate::job::background_command(node)
         .arg("--version")
         .output()
         .map_err(|error| error.to_string())?;
@@ -176,11 +176,11 @@ pub fn npm_command() -> Result<Command, String> {
     let npm = system_npm()?;
     if cfg!(windows) {
         let node = system_node()?;
-        let mut command = Command::new(node);
+        let mut command = crate::job::background_command(node);
         command.arg(npm);
         Ok(command)
     } else {
-        Ok(Command::new(npm))
+        Ok(crate::job::background_command(npm))
     }
 }
 
@@ -214,7 +214,7 @@ fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
 
 fn command_candidates(name: &str) -> Vec<PathBuf> {
     let locator = if cfg!(windows) { "where.exe" } else { "which" };
-    let Ok(output) = Command::new(locator).arg(name).output() else {
+    let Ok(output) = crate::job::background_command(locator).arg(name).output() else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -233,7 +233,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Command::new(program)
+    crate::job::background_command(program)
         .args(args)
         .output()
         .map(|output| output.status.success())

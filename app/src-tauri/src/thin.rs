@@ -1140,7 +1140,7 @@ fn doctor_manager(root: &Path) -> Result<(), String> {
         &root.join("WebView2Loader.dll"),
         "Manager WebView2 运行时依赖",
     )?;
-    let mut child = Command::new(&executable)
+    let mut child = crate::job::background_command(&executable)
         .arg("--runtime-check")
         .current_dir(root)
         .stdout(Stdio::null())
@@ -1188,7 +1188,7 @@ fn doctor_codex(root: &Path) -> Result<(), String> {
         uuid::Uuid::new_v4().simple()
     ));
     fs::create_dir_all(&smoke_home).map_err(|error| error.to_string())?;
-    let mut child = Command::new(paths::system_node()?)
+    let mut child = crate::job::background_command(paths::system_node()?)
         .arg(entry)
         .arg("--version")
         .env("CODEX_HOME", &smoke_home)
@@ -1236,7 +1236,7 @@ fn install_node(installer: &Path) -> Result<(), String> {
 fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     while started.elapsed() < timeout {
-        let output = Command::new("tasklist.exe")
+        let output = crate::job::background_command("tasklist.exe")
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
             .map_err(|error| error.to_string())?;

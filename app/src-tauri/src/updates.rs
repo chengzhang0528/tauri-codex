@@ -393,7 +393,7 @@ fn is_newer_version(candidate: &str, current: &str) -> Result<bool, String> {
 }
 
 fn ensure_node_major(node: &Path) -> Result<(), String> {
-    let output = Command::new(node)
+    let output = crate::job::background_command(node)
         .arg("--version")
         .output()
         .map_err(|error| error.to_string())?;
@@ -420,7 +420,7 @@ fn smoke_codex(node: &Path, app: &AppHandle, root: &Path) -> Result<(), String> 
         paths::codex_root(app)?.join(format!(".smoke-home-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&smoke_home).map_err(|error| error.to_string())?;
     let result = run_status_with_timeout(
-        Command::new(node)
+        crate::job::background_command(node)
             .arg(entry)
             .arg("--version")
             .env("CODEX_HOME", &smoke_home)
@@ -485,7 +485,7 @@ fn run_output_with_timeout(
 
 fn terminate_process_tree(pid: u32) {
     if cfg!(windows) {
-        let _ = Command::new("taskkill.exe")
+        let _ = crate::job::background_command("taskkill.exe")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
