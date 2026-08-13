@@ -14,7 +14,6 @@ Depends On:
 
 | ID | 状态 | 执行类型 | 范围 | 候选/制品 | 下一可验证结果 | 入口 |
 |---|---|---|---|---|---|---|
-| DEP-0006 | InProgress | Deployment | tauri-codex / GitHub Releases 与 OSS v0.1.9 | Commit:d485d3eb598f21800425aebc3cc310fda13c1a79 | 发布并回读 v0.1.9 双源闭包，再下载安装 Installer 1.0.4 验收 | `文档/项目/项目_tauri-codex/推进中/DEP-0006-v0.1.9-双源发布.md` |
 ## 维护规则
 
 - 只有已授权工作需要跨会话恢复、持续阻断恢复或外部部分状态恢复时才登记。

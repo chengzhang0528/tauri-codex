@@ -37,3 +37,5 @@ Depends On:
 不可用公开版本只能通过 `.github/workflows/retire-windows-release.yml` 手工撤回。操作者必须提供旧 Manager、旧 Installer 和已激活替代 Manager 三个稳定版本；工作流先验证 OSS 当前 Bootstrap 与替代 GitHub Bootstrap 同字节，再删除旧版本精确 OSS object key，旧 manifest 最后删除并逐项确认匿名 404，随后删除精确旧 tag 和 GitHub Release。替代未激活、当前 Bootstrap 仍引用旧 Installer、旧身份不匹配或任一删除未生效时立即停止；幂等重跑不得扩大到目录、前缀、本机 previous release 或替代版本。
 
 Manager 组件归档必须同时包含非空的 `tauri-codex-manager.exe` 与同目录 `WebView2Loader.dll`，不得依赖 Installer 目录或调用者工作目录提供动态库。Launcher 在该目录运行有超时的 `--runtime-check` 后才允许 stage/激活，并以同一目录作为正式启动工作目录；缺文件、doctor 失败或超时均保留当前可用 release。
+
+客户端交付的最终验收必须同时覆盖首次安装和普通客户端更新两条真实路径。首次安装从公开 Release 下载该 Installer 首次发布的 Setup，核对公开大小与 SHA-256 后安装，确认安装登记、桌面快捷方式、Manager 运行时闭包和窗口启动均可用。普通客户端更新必须另外发布一个复用相同 Installer 版本的更高 Manager 版本，从已安装的上一 Manager 通过界面中的检查更新和用户明确确认完成下载、校验、stage 与激活；验收后 Manager/current 必须变为新版本、previous 必须保留上一版本，Windows 安装登记中的 Installer 版本必须保持不变，且过程中不得下载或运行新的 Setup。只有这两条路径、GitHub/OSS 公开闭包和启动健康检查全部通过，才可报告客户端发布最终通过。
