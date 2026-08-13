@@ -26,6 +26,8 @@ const componentRoot = path.join(releaseRoot, "components");
 const releaseManifest = path.join(releaseRoot, "manifest.json");
 const bootstrapResource = path.join(appRoot, "src-tauri", "resources", "bootstrap.json");
 const managerSource = path.join(targetReleaseRoot, "tauri-codex-manager.exe");
+const managerWebViewLoaderSource = path.join(targetReleaseRoot, "WebView2Loader.dll");
+const managerArchiveFiles = [path.basename(managerSource), path.basename(managerWebViewLoaderSource)];
 const releaseAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/v${appVersion}/${name}`;
 const installerAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/${installerReleaseTag}/${name}`;
 const releaseObjectKey = (name) => `releases/${appVersion}/windows-x64/${name}`;
@@ -142,6 +144,26 @@ function runQuiet(command, args, options = {}) {
   });
 }
 
+function listArchiveEntries(archivePath) {
+  const result = runQuiet("tar.exe", ["-tf", archivePath], { capture: true });
+  if (result.error || result.status !== 0) {
+    fail(`无法读取组件归档 ${archivePath}：${result.error?.message ?? result.stderr ?? result.status}`);
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, ""))
+    .filter(Boolean)
+    .sort();
+}
+
+function verifyManagerArchive(archivePath) {
+  const entries = listArchiveEntries(archivePath);
+  const expected = [...managerArchiveFiles].sort();
+  if (JSON.stringify(entries) !== JSON.stringify(expected)) {
+    fail(`Manager 组件归档内容不完整：期望 ${expected.join(", ")}，实际 ${entries.join(", ")}`);
+  }
+}
+
 function prepareComponentAssets() {
   const codexRoot = path.join(appRoot, "src-tauri", "resources", "codex");
   const nodeRoot = path.join(appRoot, "src-tauri", "resources", "node");
@@ -155,9 +177,13 @@ function prepareComponentAssets() {
   const nodeAsset = path.join(componentRoot, `node-v${config.nodeVersion}-x64.msi`);
   copyFileSync(nodeMsi, nodeAsset);
   if (!existsSync(managerSource)) fail(`Manager 构建产物不存在：${managerSource}`);
+  if (!existsSync(managerWebViewLoaderSource) || statSync(managerWebViewLoaderSource).size === 0) {
+    fail(`Manager WebView2 运行时依赖不存在：${managerWebViewLoaderSource}`);
+  }
   const managerArchive = path.join(componentRoot, `tauri-codex-manager-${appVersion}-windows-x64.zip`);
-  const managerResult = runQuiet("tar.exe", ["-a", "-c", "-f", managerArchive, "-C", path.dirname(managerSource), path.basename(managerSource)]);
+  const managerResult = runQuiet("tar.exe", ["-a", "-c", "-f", managerArchive, "-C", path.dirname(managerSource), ...managerArchiveFiles]);
   if (managerResult.error || managerResult.status !== 0) fail(`无法创建 Manager 组件归档：${managerResult.error?.message ?? managerResult.status}`);
+  verifyManagerArchive(managerArchive);
   const manifest = {
     schemaVersion: 1,
     product: "tauri-codex",
@@ -347,6 +373,7 @@ function verifyReleaseCandidate() {
     const measured = artifactRecord(local);
     if (measured.size !== component.artifact.size || measured.sha256 !== component.artifact.sha256 ||
         component.artifact.objectKey !== componentObjectKey(name)) fail(`组件清单摘要或 OSS object key 不一致：${name}`);
+    if (component.id === "manager") verifyManagerArchive(local);
   }
   console.log(JSON.stringify({ verified: true, installer: artifact, installerReused: !buildingInstaller, thinInstaller: true, components: thinManifest.components.map((component) => component.id), codexVersion: config.codexVersion, nodeVersion: config.nodeVersion }, null, 2));
 }

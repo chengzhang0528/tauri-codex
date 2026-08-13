@@ -702,6 +702,7 @@ fn launch_current_manager(root: &Path) -> Result<(), String> {
     let launcher = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(&manager)
         .env("TAURI_CODEX_LAUNCHER", launcher)
+        .current_dir(manager.parent().unwrap_or_else(|| Path::new(".")))
         .spawn()
         .map_err(|error| format!("无法启动 Manager {}：{error}", manager.display()))?;
     Ok(())
@@ -1134,16 +1135,43 @@ fn unpack_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
 
 fn doctor_manager(root: &Path) -> Result<(), String> {
     let executable = root.join("tauri-codex-manager.exe");
-    if executable.is_file()
-        && fs::metadata(&executable)
-            .map_err(|error| error.to_string())?
-            .len()
-            > 0
-    {
-        Ok(())
-    } else {
-        Err(format!("Manager 入口不存在：{}", executable.display()))
+    require_nonempty_manager_file(&executable, "Manager 入口")?;
+    require_nonempty_manager_file(
+        &root.join("WebView2Loader.dll"),
+        "Manager WebView2 运行时依赖",
+    )?;
+    let mut child = Command::new(&executable)
+        .arg("--runtime-check")
+        .current_dir(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("无法执行 Manager doctor {}：{error}", executable.display()))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                return Err(format!(
+                    "Manager doctor 退出码 {}",
+                    status.code().unwrap_or(-1)
+                ))
+            }
+            None if started.elapsed() >= DOCTOR_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Manager doctor 超时".to_string());
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
     }
+}
+
+fn require_nonempty_manager_file(path: &Path, label: &str) -> Result<(), String> {
+    if !path.is_file() || fs::metadata(path).map_err(|error| error.to_string())?.len() == 0 {
+        return Err(format!("{label}不存在或为空：{}", path.display()));
+    }
+    Ok(())
 }
 
 fn doctor_codex(root: &Path) -> Result<(), String> {
@@ -1282,9 +1310,10 @@ fn validate_version(value: &str) -> Result<(), String> {
 mod tests {
     use super::{
         artifact_source_urls, commit_staged_release, current_release_path, current_release_version,
-        installer_is_newer, retry_windows_move, should_prepare_installed_release,
-        try_trusted_sources, validate_artifact, verify_digest, Artifact, CurrentReleaseState,
-        OSS_BASE_URL, WINDOWS_MOVE_RETRY_ATTEMPTS, WINDOWS_MOVE_RETRY_DELAY,
+        installer_is_newer, require_nonempty_manager_file, retry_windows_move,
+        should_prepare_installed_release, try_trusted_sources, validate_artifact, verify_digest,
+        Artifact, CurrentReleaseState, OSS_BASE_URL, WINDOWS_MOVE_RETRY_ATTEMPTS,
+        WINDOWS_MOVE_RETRY_DELAY,
     };
     use sha2::Digest;
     use std::fs;
@@ -1351,8 +1380,30 @@ mod tests {
     }
 
     #[test]
+    fn manager_doctor_requires_nonempty_executable_and_webview_loader() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-manager-closure-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("tauri-codex-manager.exe");
+        let loader = root.join("WebView2Loader.dll");
+
+        fs::write(&executable, b"manager").unwrap();
+        assert!(require_nonempty_manager_file(&loader, "Manager WebView2 运行时依赖").is_err());
+        fs::write(&loader, []).unwrap();
+        assert!(require_nonempty_manager_file(&loader, "Manager WebView2 运行时依赖").is_err());
+        fs::write(&loader, b"loader").unwrap();
+        assert!(require_nonempty_manager_file(&executable, "Manager 入口").is_ok());
+        assert!(require_nonempty_manager_file(&loader, "Manager WebView2 运行时依赖").is_ok());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn compares_installer_version_independently_from_manager_version() {
-        assert!(installer_is_newer("1.0.4").unwrap());
+        assert!(installer_is_newer("1.0.5").unwrap());
+        assert!(!installer_is_newer("1.0.4").unwrap());
         assert!(!installer_is_newer("1.0.3").unwrap());
         assert!(!installer_is_newer("0.1.2").unwrap());
     }

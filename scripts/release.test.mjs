@@ -28,8 +28,8 @@ test("desktop packaging keeps the stable installer independent and thin", () => 
   assert.equal(lock.version, app.version);
   assert.equal(lock.packages[""].version, app.version);
   assert.match(cargo, new RegExp(`^version = "${app.version.replaceAll(".", "\\.")}"$`, "m"));
-  assert.equal(installer.installerVersion, "1.0.3");
-  assert.equal(installer.releaseTag, "v0.1.8");
+  assert.equal(installer.installerVersion, "1.0.4");
+  assert.equal(installer.releaseTag, "v0.1.9");
   assert.equal(tauri.version, installer.installerVersion);
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
@@ -59,9 +59,18 @@ test("split launcher and manager are explicit build outputs", () => {
   assert.match(cargo, /^required-features\s*=\s*\["custom-protocol"\]$/m);
   assert.match(pipeline, /--bin",\s*"tauri-codex-manager"/);
   assert.match(pipeline, /--features",\s*"custom-protocol"/);
+  assert.match(pipeline, /WebView2Loader\.dll/);
+  assert.match(pipeline, /verifyManagerArchive\(managerArchive\)/);
   assert.match(managerMain, /not\(feature = "custom-protocol"\)/);
   assert.match(managerMain, /compile_error!/);
   assert.match(pipeline, /writeFileSync\(bootstrapResource[\s\S]*tauri",\s*"--",\s*"bundle"/);
+});
+
+test("manager doctor and launch use the complete runtime directory", () => {
+  const thin = readFileSync(new URL("../app/src-tauri/src/thin.rs", import.meta.url), "utf8");
+  assert.match(thin, /root\.join\("WebView2Loader\.dll"\)/);
+  assert.match(thin, /\.arg\("--runtime-check"\)[\s\S]*\.current_dir\(root\)/);
+  assert.match(thin, /Command::new\(&manager\)[\s\S]*\.current_dir\(manager\.parent\(\)/);
 });
 
 test("release admits and stages OSS before GitHub publication, then commits Bootstrap last", () => {
