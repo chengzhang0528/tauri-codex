@@ -241,6 +241,95 @@ export async function commitRelease({ releaseRoot, accessKeyId, accessKeySecret,
   return { published: true, release: release.manifest.version, installerVersion: release.bootstrap.installer.version, bootstrapKey: OSS_BOOTSTRAP_KEY };
 }
 
+function parseReleaseManifest(bytes, version) {
+  const manifest = JSON.parse(bytes);
+  if (manifest.schemaVersion !== 1 || manifest.product !== "tauri-codex" || manifest.version !== version ||
+      manifest.platform !== "windows" || manifest.architecture !== "x86_64" || !Array.isArray(manifest.components)) {
+    throw new Error(`release ${version} manifest identity is invalid`);
+  }
+  for (const component of manifest.components) {
+    validateArtifact(component.artifact, `releases/${version}/windows-x64/components/`);
+  }
+  return manifest;
+}
+
+async function confirmDeleted(fetchImpl, baseURL, key) {
+  if (await getOSS(fetchImpl, baseURL, key)) {
+    throw new Error(`OSS retirement did not remove ${key}`);
+  }
+}
+
+export async function retireRelease({
+  oldVersion,
+  oldInstallerVersion,
+  replacementVersion,
+  accessKeyId,
+  accessKeySecret,
+  fetchImpl = fetch,
+  baseURL = OSS_BASE_URL,
+  bucket = OSS_BUCKET,
+}) {
+  if (![oldVersion, oldInstallerVersion, replacementVersion].every((version) => stableVersion.test(version ?? "")) ||
+      compareVersions(replacementVersion, oldVersion) <= 0) {
+    throw new Error("retirement requires stable old/installer/replacement versions and a newer replacement");
+  }
+  const settings = publisherSettings({ accessKeyId, accessKeySecret, baseURL, bucket });
+  const currentBytes = await getOSS(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  if (!currentBytes) throw new Error("OSS Bootstrap is missing; refusing retirement");
+  const current = JSON.parse(currentBytes);
+  if (current.release?.version !== replacementVersion || compareVersions(current.installer?.version, oldInstallerVersion) < 0) {
+    throw new Error("OSS Bootstrap has not activated the requested replacement release and installer");
+  }
+  await readExact(
+    fetchImpl,
+    `https://github.com/chengzhang0528/tauri-codex/releases/download/v${replacementVersion}/bootstrap.json`,
+    currentBytes,
+    "GitHub replacement Bootstrap",
+  );
+
+  const manifestKey = `releases/${oldVersion}/windows-x64/manifest.json`;
+  const manifestBytes = await getOSS(fetchImpl, baseURL, manifestKey);
+  if (!manifestBytes) {
+    return { retired: true, alreadyRetired: true, oldVersion, replacementVersion, deletedKeys: [] };
+  }
+  const manifest = parseReleaseManifest(manifestBytes, oldVersion);
+  const oldBootstrapBytes = await readResponse(await fetchImpl(
+    `https://github.com/chengzhang0528/tauri-codex/releases/download/v${oldVersion}/bootstrap.json`,
+    { headers: { "User-Agent": "tauri-codex-release-publisher" }, redirect: "follow" },
+  ), "GitHub old Bootstrap");
+  const oldBootstrap = JSON.parse(oldBootstrapBytes);
+  const installerKey = `installers/${oldInstallerVersion}/windows-x64/tauri-codex_${oldInstallerVersion}_x64-setup.exe`;
+  if (oldBootstrap.release?.version !== oldVersion || oldBootstrap.installer?.version !== oldInstallerVersion ||
+      oldBootstrap.release?.manifest?.objectKey !== manifestKey || oldBootstrap.installer?.artifact?.objectKey !== installerKey) {
+    throw new Error("old GitHub Bootstrap does not match the requested retirement identity");
+  }
+
+  const protectedKeys = new Set([
+    current.release?.manifest?.objectKey,
+    current.installer?.artifact?.objectKey,
+  ]);
+  const componentKeys = manifest.components.map((component) => component.artifact.objectKey);
+  const deleteKeys = [...componentKeys];
+  if (!protectedKeys.has(installerKey)) deleteKeys.push(installerKey);
+  if (deleteKeys.some((key) => protectedKeys.has(key)) || protectedKeys.has(manifestKey)) {
+    throw new Error("retirement attempted to delete an object referenced by the current Bootstrap");
+  }
+
+  for (const key of deleteKeys) {
+    await deleteOSS(fetchImpl, settings, key);
+    await confirmDeleted(fetchImpl, baseURL, key);
+  }
+  await deleteOSS(fetchImpl, settings, manifestKey);
+  await confirmDeleted(fetchImpl, baseURL, manifestKey);
+  return {
+    retired: true,
+    alreadyRetired: false,
+    oldVersion,
+    replacementVersion,
+    deletedKeys: [...deleteKeys, manifestKey],
+  };
+}
+
 export async function publishRelease(options) {
   await stageRelease(options);
   return commitRelease(options);
@@ -249,9 +338,9 @@ export async function publishRelease(options) {
 async function main() {
   const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
   const workspaceRoot = path.resolve(scriptRoot, "..");
-  const [mode, version] = process.argv.slice(2);
-  if (!new Set(["preflight", "stage", "commit"]).has(mode) || !stableVersion.test(version ?? "")) {
-    throw new Error("usage: node scripts/oss-release.mjs <preflight|stage|commit> <version>");
+  const [mode, version, installerVersion, replacementVersion] = process.argv.slice(2);
+  if (!new Set(["preflight", "stage", "commit", "retire"]).has(mode) || !stableVersion.test(version ?? "")) {
+    throw new Error("usage: node scripts/oss-release.mjs <preflight|stage|commit> <version> or retire <old-version> <old-installer-version> <replacement-version>");
   }
   const options = {
     releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"),
@@ -260,7 +349,13 @@ async function main() {
     probeId: `${process.env.GITHUB_RUN_ID ?? "local"}-${process.env.GITHUB_RUN_ATTEMPT ?? randomUUID()}`,
   };
   const result = mode === "preflight" ? await preflightPublisher(options) :
-    mode === "stage" ? await stageRelease(options) : await commitRelease(options);
+    mode === "stage" ? await stageRelease(options) :
+    mode === "commit" ? await commitRelease(options) : await retireRelease({
+      ...options,
+      oldVersion: version,
+      oldInstallerVersion: installerVersion,
+      replacementVersion,
+    });
   console.log(JSON.stringify(result, null, 2));
 }
 

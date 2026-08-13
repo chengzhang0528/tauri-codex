@@ -11,6 +11,7 @@ import {
   ossAuthorization,
   preflightPublisher,
   publishRelease,
+  retireRelease,
   safeObjectKey,
   stageRelease,
 } from "./oss-release.mjs";
@@ -203,5 +204,72 @@ test("does not commit Bootstrap unless GitHub exposes the frozen candidate", asy
     assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), oldBootstrap);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
+  }
+});
+
+test("retires only an old release closure after its replacement is active", async () => {
+  const oldRelease = fixture("0.1.8", "1.0.3");
+  const replacement = fixture("0.1.9", "1.0.4");
+  const currentBytes = replacement.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.9/bootstrap.json");
+  const oldManifestKey = oldRelease.bootstrap.release.manifest.objectKey;
+  const objects = [
+    [OSS_BOOTSTRAP_KEY, currentBytes],
+    [oldManifestKey, Buffer.from(`${JSON.stringify(oldRelease.manifest, null, 2)}\n`)],
+    [oldRelease.bootstrap.installer.artifact.objectKey, oldRelease.github.get(oldRelease.bootstrap.installer.artifact.url)],
+    ...oldRelease.manifest.components.map((component) => [component.artifact.objectKey, oldRelease.github.get(component.artifact.url)]),
+  ];
+  const github = new Map([...oldRelease.github, ...replacement.github]);
+  const remote = fakeFetch(github, { objects });
+  try {
+    const result = await retireRelease({
+      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
+      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
+    });
+    assert.equal(result.retired, true);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), currentBytes);
+    assert.equal(remote.events.filter((event) => event.startsWith("delete:")).at(-1), `delete:${oldManifestKey}`);
+    for (const key of result.deletedKeys) assert.equal(remote.objects.has(key), false);
+  } finally {
+    rmSync(oldRelease.root, { recursive: true, force: true });
+    rmSync(replacement.root, { recursive: true, force: true });
+  }
+});
+
+test("retirement refuses to remove a release before the replacement Bootstrap is active", async () => {
+  const oldRelease = fixture("0.1.8", "1.0.3");
+  const oldBytes = oldRelease.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.8/bootstrap.json");
+  const remote = fakeFetch(oldRelease.github, { objects: [[OSS_BOOTSTRAP_KEY, oldBytes]] });
+  try {
+    await assert.rejects(() => retireRelease({
+      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
+      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
+    }), /has not activated/);
+    assert.equal(remote.events.some((event) => event.startsWith("delete:")), false);
+  } finally {
+    rmSync(oldRelease.root, { recursive: true, force: true });
+  }
+});
+
+test("retirement preserves an Installer still referenced by the replacement", async () => {
+  const oldRelease = fixture("0.1.8", "1.0.3");
+  const replacement = fixture("0.1.9", "1.0.3");
+  const currentBytes = replacement.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.9/bootstrap.json");
+  const objects = [
+    [OSS_BOOTSTRAP_KEY, currentBytes],
+    [oldRelease.bootstrap.release.manifest.objectKey, Buffer.from(`${JSON.stringify(oldRelease.manifest, null, 2)}\n`)],
+    [oldRelease.bootstrap.installer.artifact.objectKey, oldRelease.github.get(oldRelease.bootstrap.installer.artifact.url)],
+    ...oldRelease.manifest.components.map((component) => [component.artifact.objectKey, oldRelease.github.get(component.artifact.url)]),
+  ];
+  const remote = fakeFetch(new Map([...oldRelease.github, ...replacement.github]), { objects });
+  try {
+    const result = await retireRelease({
+      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
+      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
+    });
+    assert.equal(result.deletedKeys.includes(oldRelease.bootstrap.installer.artifact.objectKey), false);
+    assert.equal(remote.objects.has(oldRelease.bootstrap.installer.artifact.objectKey), true);
+  } finally {
+    rmSync(oldRelease.root, { recursive: true, force: true });
+    rmSync(replacement.root, { recursive: true, force: true });
   }
 });

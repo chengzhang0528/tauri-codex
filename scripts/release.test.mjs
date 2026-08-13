@@ -86,3 +86,14 @@ test("release admits and stages OSS before GitHub publication, then commits Boot
   assert.match(pipeline, /releases\/\$\{appVersion\}\/windows-x64\/components/);
   assert.match(pipeline, /installers\/\$\{installerVersion\}\/windows-x64/);
 });
+
+test("retirement is manual, environment-gated, and deletes the exact OSS closure first", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/retire-windows-release.yml", import.meta.url), "utf8");
+  const publisher = readFileSync(new URL("./oss-release.mjs", import.meta.url), "utf8");
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /environment: oss-release/);
+  assert.doesNotMatch(workflow, /\n\s+push:/);
+  assert.match(workflow, /publish:release:oss -- retire[\s\S]*Delete the exact old tag, then its GitHub Release/);
+  assert.match(publisher, /GitHub replacement Bootstrap/);
+  assert.match(publisher, /for \(const key of deleteKeys\)[\s\S]*deleteOSS[\s\S]*deleteOSS\(fetchImpl, settings, manifestKey\)/);
+});
