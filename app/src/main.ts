@@ -11,6 +11,7 @@ import {
   Download,
   FileText,
   Folder,
+  MessageSquare,
   Play,
   Plus,
   RefreshCw,
@@ -68,7 +69,7 @@ type ReleaseInfo = {
 };
 type CodexUpdateInfo = { current_version: string | null; latest_version: string; update_available: boolean };
 type UpdateResult = { version: string; path: string; kind: string };
-type ControlView = "sessions" | "api" | "settings";
+type ControlView = "sessions" | "api" | "settings" | "updates";
 type StatusTone = "neutral" | "error" | "success";
 type UpdateState = { release?: ReleaseInfo; codex?: CodexUpdateInfo; checking: boolean; checkedAt?: number };
 
@@ -79,6 +80,7 @@ const iconSet = {
   Download,
   FileText,
   Folder,
+  MessageSquare,
   Play,
   Plus,
   RefreshCw,
@@ -203,7 +205,7 @@ function mountIcons(): void { createIcons({ icons: iconSet }); }
 function valueOf(id: string): string { return document.querySelector<HTMLInputElement>(`#${id}`)?.value ?? ""; }
 function valueOfSelect(id: string): string { return document.querySelector<HTMLSelectElement>(`#${id}`)?.value ?? ""; }
 function isControlView(value: string | null): value is ControlView {
-  return value === "sessions" || value === "api" || value === "settings";
+  return value === "sessions" || value === "api" || value === "settings" || value === "updates";
 }
 function setStatus(message: string, tone: StatusTone = "neutral"): void {
   const toast = document.querySelector<HTMLElement>("#app-toast");
@@ -271,8 +273,9 @@ async function renderControl(): Promise<void> {
         </nav>
         <section class="session-tree-panel" id="session-tree-panel" aria-label="工作目录和运行中的会话"></section>
         <nav class="primary-nav utility-nav" aria-label="配置导航">
-          <button class="nav-item" data-view="api"><i data-lucide="server"></i><span>模型实例</span></button>
+          <button class="nav-item" data-view="api"><i data-lucide="server"></i><span>配置模型</span></button>
           <button class="nav-item" data-view="settings"><i data-lucide="settings"></i><span>设置</span></button>
+          <button class="nav-item" data-view="updates"><i data-lucide="download"></i><span>更新</span><span class="nav-status" id="nav-update-status"></span></button>
         </nav>
         <div class="sidebar-meta"><span>Codex</span><strong id="sidebar-codex-version">--</strong></div>
       </aside>
@@ -289,6 +292,12 @@ async function renderControl(): Promise<void> {
         </section>
       </section>
       <div class="toast" id="app-toast" data-tone="neutral" hidden></div>
+      <div class="session-launcher-backdrop" id="session-launcher" hidden>
+        <section class="session-launcher-dialog" role="dialog" aria-modal="true" aria-labelledby="session-launcher-title">
+          <div class="session-launcher-heading"><div><h2 id="session-launcher-title">新建会话</h2><small id="session-launcher-workdir"></small></div><button class="icon-button" id="session-launcher-close" type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+          <div id="session-launcher-body"></div>
+        </section>
+      </div>
     </main>`;
 
   let snapshot = await call<Snapshot>("get_snapshot");
@@ -308,6 +317,7 @@ async function renderControl(): Promise<void> {
   const collapsedWorkdirs = new Set<string>();
   const terminalOrdinals = new Map<string, number>();
   const nextOrdinalByWorkdir = new Map<string, number>();
+  let openSessionLauncher: (workdir: string, resume?: boolean) => void = () => undefined;
   const controlWorkspace = document.querySelector<HTMLElement>("#control-workspace")!;
   const terminalWorkspace = document.querySelector<HTMLElement>("#terminal-workspace")!;
   const terminalDeck = document.querySelector<HTMLElement>("#terminal-deck")!;
@@ -362,7 +372,7 @@ async function renderControl(): Promise<void> {
                     terminalOrdinals.set(terminal.id, ordinal);
                   }
                   const label = terminal.resume ? `恢复会话 ${ordinal}` : `会话 ${ordinal}`;
-                  const detail = server?.name || "实例已删除";
+                  const detail = server?.name || "配置已删除";
                   return `
                     <button class="tree-session is-running ${terminal.id === activeTerminalId ? "is-selected" : ""}" type="button" data-terminal-id="${escapeHtml(terminal.id)}" aria-pressed="${terminal.id === activeTerminalId}" title="${escapeHtml(label)} · ${escapeHtml(workdir)}">
                       <span class="tree-session-indicator" data-status="${escapeHtml(terminal.status)}"></span>
@@ -406,7 +416,7 @@ async function renderControl(): Promise<void> {
         const workdir = button.dataset.workdir;
         if (!workdir) return;
         selectWorkdir(workdir);
-        window.requestAnimationFrame(() => document.querySelector<HTMLSelectElement>("#session-server")?.focus());
+        openSessionLauncher(workdir);
       });
     });
     panel.querySelectorAll<HTMLButtonElement>(".tree-remove-workdir").forEach((button) => {
@@ -626,7 +636,7 @@ async function renderControl(): Promise<void> {
       return;
     }
     if (rerender && activeTerminalId === null) renderView(activeView);
-    else renderUpdatePanel(snapshot, updateState);
+    else if (activeView === "updates") renderUpdatePanel(snapshot, updateState);
   };
   const launchSession = async (workdir: string, serverId: string, resume: boolean): Promise<void> => {
     const normalizedWorkdir = normalizeWorkdir(workdir);
@@ -636,8 +646,7 @@ async function renderControl(): Promise<void> {
       return;
     }
     if (!serverId) {
-      setStatus("请选择模型实例", "error");
-      document.querySelector<HTMLSelectElement>("#session-server")?.focus();
+      setStatus("请选择配置模型", "error");
       return;
     }
     draftWorkdir = normalizedWorkdir;
@@ -656,7 +665,7 @@ async function renderControl(): Promise<void> {
       await showTerminal(instance);
     } catch (error) {
       setStatus(String(error), "error");
-      renderSessionPage();
+      renderView("sessions");
     }
   };
   const chooseWorkdir = async (): Promise<void> => {
@@ -695,6 +704,54 @@ async function renderControl(): Promise<void> {
     renderSessionPage();
     setStatus("已从工作目录列表移除", "success");
   };
+  openSessionLauncher = (workdir: string, resume = false): void => {
+    const backdrop = document.querySelector<HTMLElement>("#session-launcher");
+    const body = document.querySelector<HTMLElement>("#session-launcher-body");
+    const workdirLabelNode = document.querySelector<HTMLElement>("#session-launcher-workdir");
+    if (!backdrop || !body || !workdirLabelNode) return;
+    const options = snapshot.servers
+      .map((server) => `<option value="${escapeHtml(server.id)}">${escapeHtml(server.name)}${server.is_default ? "（默认）" : ""}</option>`)
+      .join("");
+    workdirLabelNode.textContent = workdir || "未选择工作目录";
+    body.innerHTML = snapshot.servers.length > 0
+      ? `<form id="session-launch-form" class="session-launcher-form">
+          <label class="field"><span>配置模型</span><select id="session-server" required>${options}</select></label>
+          <div class="session-launcher-actions">
+            <button class="button button-secondary" id="resume-session" type="button"><i data-lucide="rotate-ccw"></i><span>恢复会话</span></button>
+            <button class="button button-primary session-launch-action" type="submit"><i data-lucide="play"></i><span>新会话</span></button>
+          </div>
+        </form>`
+      : `<div class="session-launcher-empty"><i data-lucide="server"></i><strong>还没有配置模型</strong><small>先完成配置，才能启动 Codex 会话。</small><button class="button button-primary" id="session-configure-model" type="button"><i data-lucide="settings"></i><span>配置模型</span></button></div>`;
+    backdrop.hidden = false;
+    mountIcons();
+    const server = document.querySelector<HTMLSelectElement>("#session-server");
+    if (server) server.value = snapshot.servers.some((item) => item.id === draftServerId)
+      ? draftServerId
+      : snapshot.servers.find((item) => item.is_default)?.id ?? snapshot.servers[0]?.id ?? "";
+    document.querySelector<HTMLFormElement>("#session-launch-form")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      backdrop.hidden = true;
+      void launchSession(workdir, valueOfSelect("session-server"), false);
+    });
+    document.querySelector<HTMLButtonElement>("#resume-session")?.addEventListener("click", () => {
+      backdrop.hidden = true;
+      void launchSession(workdir, valueOfSelect("session-server"), true);
+    });
+    body.querySelector<HTMLButtonElement>("#session-configure-model")?.addEventListener("click", () => {
+      backdrop.hidden = true;
+      showControl("api");
+    });
+    document.querySelector<HTMLButtonElement>("#session-launcher-close")?.focus();
+    if (resume) document.querySelector<HTMLButtonElement>("#resume-session")?.focus();
+    else window.requestAnimationFrame(() => document.querySelector<HTMLSelectElement>("#session-server")?.focus());
+  };
+  document.querySelector<HTMLButtonElement>("#session-launcher-close")?.addEventListener("click", () => {
+    const launcher = document.querySelector<HTMLElement>("#session-launcher");
+    if (launcher) launcher.hidden = true;
+  });
+  document.querySelector<HTMLElement>("#session-launcher")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) (event.currentTarget as HTMLElement).hidden = true;
+  });
   const checkUpdates = async (silent = false): Promise<void> => {
     if (updateState.checking) return;
     updateState.checking = true;
@@ -726,13 +783,8 @@ async function renderControl(): Promise<void> {
     }
   };
   const renderSessionPage = (): void => {
-    renderSessionsView(snapshot, draftWorkdir, draftServerId);
-    bindSessionsView({
-      workdir: draftWorkdir,
-      launch: (workdir, serverId, resume) => void launchSession(workdir, serverId, resume),
-      chooseWorkdir: () => void chooseWorkdir(),
-      selectServer: (serverId) => { draftServerId = serverId; },
-    });
+    renderSessionsView(snapshot, draftWorkdir);
+    document.querySelectorAll<HTMLButtonElement>(".choose-workdir").forEach((button) => button.addEventListener("click", () => void chooseWorkdir()));
     mountIcons();
   };
   const renderView = (view: ControlView): void => {
@@ -754,24 +806,27 @@ async function renderControl(): Promise<void> {
       actions.innerHTML = '<button class="icon-button" id="header-new-session" title="新会话" aria-label="新会话"><i data-lucide="plus"></i></button>';
       renderSessionPage();
       document.querySelector<HTMLButtonElement>("#header-new-session")?.addEventListener("click", () => {
-        if (draftWorkdir) {
-          document.querySelector<HTMLSelectElement>("#session-server")?.focus();
-        } else {
-          void chooseWorkdir();
-        }
+        if (draftWorkdir) openSessionLauncher(draftWorkdir);
+        else void chooseWorkdir().then(() => { if (draftWorkdir) openSessionLauncher(draftWorkdir); });
       });
     } else if (view === "api") {
-      title.textContent = "模型实例";
-      meta.textContent = `${snapshot.servers.length} 个实例`;
-      actions.innerHTML = '<button class="icon-button" id="new-server" title="新建模型实例" aria-label="新建模型实例"><i data-lucide="plus"></i></button>';
+      title.textContent = "配置模型";
+      meta.textContent = `${snapshot.servers.length} 个配置`;
+      actions.innerHTML = '<button class="icon-button" id="new-server" title="新建配置模型" aria-label="新建配置模型"><i data-lucide="plus"></i></button>';
       renderApiView(snapshot);
       bindApiView(refreshSnapshot);
-    } else {
+    } else if (view === "settings") {
       title.textContent = "设置";
       meta.textContent = `应用 ${snapshot.app_version}`;
       actions.innerHTML = "";
-      renderSettingsView(snapshot, updateState);
+      renderSettingsView(snapshot);
       bindSettingsView(snapshot, refreshSnapshot, checkUpdates);
+    } else {
+      title.textContent = "更新";
+      meta.textContent = `应用 ${snapshot.app_version}`;
+      actions.innerHTML = "";
+      renderUpdatesView(snapshot, updateState);
+      bindUpdatesView(snapshot, refreshSnapshot, checkUpdates);
     }
     mountIcons();
   };
@@ -804,7 +859,7 @@ async function renderControl(): Promise<void> {
       return;
     }
     if (activeTerminalId === null && activeView === "sessions") renderView(activeView);
-    else if (activeTerminalId === null) renderUpdatePanel(snapshot, updateState);
+    else if (activeTerminalId === null && activeView === "updates") renderUpdatePanel(snapshot, updateState);
   });
   window.addEventListener("resize", () => {
     const active = activeTerminalId ? terminals.get(activeTerminalId) : undefined;
@@ -818,69 +873,32 @@ async function renderControl(): Promise<void> {
   window.setInterval(() => void checkUpdates(true), 6 * 60 * 60 * 1000);
 }
 
-function renderSessionsView(snapshot: Snapshot, draftWorkdir: string, draftServerId: string): void {
+function renderSessionsView(snapshot: Snapshot, draftWorkdir: string): void {
   const content = document.querySelector<HTMLElement>("#view-content");
   if (!content) return;
-  const options = snapshot.servers
-    .map((server) => `<option value="${escapeHtml(server.id)}">${escapeHtml(server.name)}${server.is_default ? "（默认）" : ""}</option>`)
-    .join("");
-  const serverOptions = options || '<option value="" disabled>请先创建模型实例</option>';
-  const launchDisabled = snapshot.servers.length === 0 || !draftWorkdir ? " disabled" : "";
-  const activeWorkdir = draftWorkdir
-    ? `<div class="current-workdir">
-        <span class="workdir-symbol"><i data-lucide="folder"></i></span>
-        <span class="current-workdir-copy"><small>当前工作目录</small><strong>${escapeHtml(workdirLabel(draftWorkdir))}</strong><code title="${escapeHtml(draftWorkdir)}">${escapeHtml(draftWorkdir)}</code></span>
-        <button class="button button-secondary choose-workdir" type="button"><i data-lucide="folder"></i><span>更换</span></button>
-      </div>`
-    : `<div class="current-workdir is-empty">
-        <span class="workdir-symbol"><i data-lucide="folder"></i></span>
-        <span class="current-workdir-copy"><small>当前工作目录</small><strong>未选择</strong></span>
-        <button class="button button-primary choose-workdir" id="choose-workdir" type="button"><i data-lucide="folder"></i><span>选择目录</span></button>
-      </div>`;
+  const state = snapshot.servers.length === 0
+    ? `<div class="session-empty-state"><i data-lucide="server"></i><strong>先配置模型</strong><small>配置完成后，从左侧工作目录创建或恢复会话。</small><button class="button button-primary" id="session-configure-model" type="button"><i data-lucide="settings"></i><span>配置模型</span></button></div>`
+    : `<div class="session-empty-state"><i data-lucide="message-square"></i><strong>${draftWorkdir ? "选择一个工作目录开始" : "添加工作目录开始"}</strong><small>${draftWorkdir ? `当前目录：${escapeHtml(workdirLabel(draftWorkdir))}。使用左侧目录旁的 + 创建会话。` : "从左侧添加工作目录，然后创建会话。"}</small>${draftWorkdir ? "" : '<button class="button button-secondary" id="session-choose-workdir" type="button"><i data-lucide="folder"></i><span>添加工作目录</span></button>'}</div>`;
   content.innerHTML = `
     <div class="session-home">
-      <form class="session-launch-form" id="session-launch-form">
-        <div class="session-launch-heading"><h2>开始会话</h2></div>
-        ${activeWorkdir}
-        <div class="session-launch-controls">
-          <label class="field"><span>模型实例</span><select id="session-server" required>${serverOptions}</select></label>
-          <div class="session-launch-buttons">
-            <button class="button button-primary session-launch-action" type="submit"${launchDisabled}><i data-lucide="play"></i><span>新会话</span></button>
-            <button class="button button-secondary session-launch-action" id="resume-session" type="button"${launchDisabled}><i data-lucide="rotate-ccw"></i><span>恢复会话</span></button>
-          </div>
-        </div>
-      </form>
+      ${state}
     </div>`;
-  const server = document.querySelector<HTMLSelectElement>("#session-server");
-  if (server) server.value = snapshot.servers.some((item) => item.id === draftServerId)
-    ? draftServerId
-    : snapshot.servers.find((item) => item.is_default)?.id ?? snapshot.servers[0]?.id ?? "";
-}
-
-function bindSessionsView(handlers: {
-  workdir: string;
-  launch: (workdir: string, serverId: string, resume: boolean) => void;
-  chooseWorkdir: () => void;
-  selectServer: (serverId: string) => void;
-}): void {
-  const currentWorkdir = handlers.workdir;
-  const launch = (resume: boolean): void => handlers.launch(currentWorkdir, valueOfSelect("session-server"), resume);
-  document.querySelector<HTMLFormElement>("#session-launch-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    launch(false);
+  content.querySelector<HTMLButtonElement>("#session-configure-model")?.addEventListener("click", () => {
+    const launcher = document.querySelector<HTMLElement>("#session-launcher");
+    if (launcher) launcher.hidden = true;
+    const apiButton = document.querySelector<HTMLButtonElement>('.nav-item[data-view="api"]');
+    apiButton?.click();
   });
-  document.querySelector<HTMLButtonElement>("#resume-session")?.addEventListener("click", () => launch(true));
-  document.querySelector<HTMLSelectElement>("#session-server")?.addEventListener("change", (event) => {
-    handlers.selectServer((event.currentTarget as HTMLSelectElement).value);
+  document.querySelector<HTMLButtonElement>("#session-choose-workdir")?.addEventListener("click", () => {
+    document.querySelector<HTMLButtonElement>(".tree-add-workdir")?.click();
   });
-  document.querySelectorAll<HTMLButtonElement>(".choose-workdir").forEach((button) => button.addEventListener("click", handlers.chooseWorkdir));
 }
 
 function renderApiView(snapshot: Snapshot): void {
   const content = document.querySelector<HTMLElement>("#view-content");
   if (!content) return;
   const rows = snapshot.servers.length === 0
-    ? '<div class="empty-state compact"><i data-lucide="server"></i><span>暂无模型实例</span></div>'
+    ? '<div class="empty-state compact"><i data-lucide="server"></i><span>暂无配置模型</span></div>'
     : snapshot.servers.map((server) => `
       <button class="api-row" type="button" data-server-id="${escapeHtml(server.id)}">
         <span class="api-row-copy"><strong>${escapeHtml(server.name)}</strong><small>${escapeHtml(server.base_url)}</small></span>
@@ -890,17 +908,17 @@ function renderApiView(snapshot: Snapshot): void {
   content.innerHTML = `
     <div class="api-layout">
       <section class="api-index">
-        <div class="section-heading"><h2>模型实例</h2><span>${snapshot.servers.length}</span></div>
+        <div class="section-heading"><h2>配置模型</h2><span>${snapshot.servers.length}</span></div>
         <div class="api-list">${rows}</div>
       </section>
       <form class="api-editor" id="server-form">
-        <div class="editor-heading"><h2 id="server-form-title">新建模型实例</h2></div>
+        <div class="editor-heading"><h2 id="server-form-title">新建配置模型</h2></div>
         <input id="server-id" type="hidden" />
         <div class="form-fields">
           <label class="field"><span>名称</span><input id="server-name" autocomplete="off" required /></label>
           <label class="field"><span>URL</span><input id="server-base-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" required /></label>
           <label class="field"><span>API Key</span><input id="server-sk" type="password" autocomplete="off" required /></label>
-          <label class="checkbox-field"><input id="server-default" type="checkbox" ${snapshot.servers.length === 0 ? "checked" : ""} /><span>默认实例</span></label>
+          <label class="checkbox-field"><input id="server-default" type="checkbox" ${snapshot.servers.length === 0 ? "checked" : ""} /><span>默认配置</span></label>
         </div>
         <div class="form-actions">
           <button class="button button-danger" id="delete-server" type="button" disabled><i data-lucide="trash-2"></i><span>删除</span></button>
@@ -916,7 +934,7 @@ function bindApiView(refreshSnapshot: (rerender?: boolean) => Promise<void>): vo
     const id = document.querySelector<HTMLInputElement>("#server-id");
     if (id) id.value = "";
     const title = document.querySelector<HTMLElement>("#server-form-title");
-    if (title) title.textContent = "新建模型实例";
+    if (title) title.textContent = "新建配置模型";
     const remove = document.querySelector<HTMLButtonElement>("#delete-server");
     if (remove) remove.disabled = true;
     document.querySelector<HTMLInputElement>("#server-name")?.focus();
@@ -943,7 +961,7 @@ function bindApiView(refreshSnapshot: (rerender?: boolean) => Promise<void>): vo
     };
     try {
       await call("save_server", { profile });
-      setStatus("模型实例已保存", "success");
+      setStatus("配置模型已保存", "success");
       await refreshSnapshot();
     } catch (error) {
       setStatus(String(error), "error");
@@ -951,10 +969,10 @@ function bindApiView(refreshSnapshot: (rerender?: boolean) => Promise<void>): vo
   });
   document.querySelector<HTMLButtonElement>("#delete-server")?.addEventListener("click", async () => {
     const id = valueOf("server-id");
-    if (!id || !window.confirm("删除这个模型实例？")) return;
+    if (!id || !window.confirm("删除这个配置模型？")) return;
     try {
       await call("delete_server", { id });
-      setStatus("模型实例已删除", "success");
+      setStatus("配置模型已删除", "success");
       await refreshSnapshot();
     } catch (error) {
       setStatus(String(error), "error");
@@ -1000,7 +1018,7 @@ function renderExecutionOptions(current: string): string {
     <label class="segment-option"><input type="radio" name="execution-mode" value="${escapeHtml(choice.value)}" ${choice.value === current ? "checked" : ""} /><span>${escapeHtml(choice.label)}</span></label>`).join("");
 }
 
-function renderSettingsView(snapshot: Snapshot, updateState: UpdateState): void {
+function renderSettingsView(snapshot: Snapshot): void {
   const content = document.querySelector<HTMLElement>("#view-content");
   if (!content) return;
   const settings = snapshot.codex_settings;
@@ -1043,16 +1061,32 @@ function renderSettingsView(snapshot: Snapshot, updateState: UpdateState): void 
         <div class="advanced-body"><textarea id="config-editor" spellcheck="false">${escapeHtml(snapshot.config_toml)}</textarea><div class="advanced-actions"><button class="button button-secondary" id="save-config" type="button"><i data-lucide="file-text"></i><span>保存高级配置</span></button></div></div>
       </details>
       <section class="settings-section">
-        <div class="section-heading settings-heading"><div><h2>更新</h2></div><button class="button button-secondary" id="check-update" type="button"></button></div>
-        <div class="setting-row"><div class="setting-copy"><strong>桌面应用</strong><small id="desktop-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.app_version)}</span><button class="button button-secondary update-button" id="desktop-update-action" type="button"></button></div>
-        <div class="setting-row"><div class="setting-copy"><strong>内置 Codex</strong><small id="codex-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.codex_version ?? "未安装")}</span><button class="button button-secondary update-button" id="codex-update-action" type="button"></button></div>
-      </section>
-      <section class="settings-section">
         <div class="section-heading settings-heading"><div><h2>数据目录</h2></div></div>
         <div class="setting-row path-row"><div class="setting-copy"><strong>CODEX_HOME</strong><code>${escapeHtml(snapshot.code_home)}</code></div><button class="icon-button" id="copy-codex-home" type="button" title="复制 CODEX_HOME" aria-label="复制 CODEX_HOME"><i data-lucide="copy"></i></button></div>
       </section>
     </div>`;
+}
+
+function renderUpdatesView(snapshot: Snapshot, updateState: UpdateState): void {
+  const content = document.querySelector<HTMLElement>("#view-content");
+  if (!content) return;
+  content.innerHTML = `
+    <div class="content-stack settings-stack updates-stack">
+      <section class="settings-section">
+        <div class="section-heading settings-heading"><div><h2>应用更新</h2><small>下载和应用会在这里明确显示</small></div><button class="button button-secondary" id="check-update" type="button"></button></div>
+        <div class="setting-row"><div class="setting-copy"><strong>桌面应用</strong><small id="desktop-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.app_version)}</span><button class="button button-secondary update-button" id="desktop-update-action" type="button"></button></div>
+        <div class="setting-row"><div class="setting-copy"><strong>内置 Codex</strong><small id="codex-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.codex_version ?? "未安装")}</span><button class="button button-secondary update-button" id="codex-update-action" type="button"></button></div>
+      </section>
+    </div>`;
   renderUpdatePanel(snapshot, updateState);
+}
+
+function bindUpdatesView(
+  snapshot: Snapshot,
+  refreshSnapshot: (rerender?: boolean) => Promise<void>,
+  checkUpdates: (silent?: boolean) => Promise<void>,
+): void {
+  bindSettingsView(snapshot, refreshSnapshot, checkUpdates);
 }
 
 function bindSettingsView(
@@ -1141,6 +1175,14 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
   const codexSummary = document.querySelector<HTMLElement>("#codex-update-summary");
   const desktopButton = document.querySelector<HTMLButtonElement>("#desktop-update-action");
   const codexButton = document.querySelector<HTMLButtonElement>("#codex-update-action");
+  const updateBadge = document.querySelector<HTMLElement>("#nav-update-status");
+  if (updateBadge) {
+    const pending = snapshot.staged_app_updates.length > 0
+      || snapshot.pending_codex_versions.length > 0
+      || Boolean(updateState.release?.update_available || updateState.codex?.update_available);
+    updateBadge.textContent = pending ? "可用" : "";
+    updateBadge.hidden = !pending;
+  }
   if (!checkButton || !desktopSummary || !codexSummary || !desktopButton || !codexButton) return;
 
   setButtonContent(checkButton, updateState.checking ? "正在检查" : updateState.checkedAt ? "再次检查" : "检查更新", "refresh-cw");
