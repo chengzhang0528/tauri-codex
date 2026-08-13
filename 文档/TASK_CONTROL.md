@@ -14,6 +14,7 @@ Depends On:
 
 | ID | 状态 | 执行类型 | 范围 | 候选/制品 | 下一可验证结果 | 入口 |
 |---|---|---|---|---|---|---|
+| DEP-0007 | InProgress | Deployment | tauri-codex / GitHub Releases 与 OSS v0.1.10 | Commit:b8594ef5fbfd26173b868b8c2557f8947de7c7c2 | 发布并回读 v0.1.10 双源闭包，再从已安装 Manager 0.1.9 直接更新验收 | `文档/项目/项目_tauri-codex/推进中/DEP-0007-v0.1.10-客户端直升发布.md` |
 ## 维护规则
 
 - 只有已授权工作需要跨会话恢复、持续阻断恢复或外部部分状态恢复时才登记。
