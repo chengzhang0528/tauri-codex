@@ -1,6 +1,6 @@
 # Technology And Update Channels
 
-Use this reference when selecting a client stack, building an installer, publishing GitHub Release assets, mirroring first-install packages, or designing in-app updates. Resolve the actual project contract first; these are selection rules, not fixed product choices.
+Use this reference when selecting a client stack, building an installer, publishing fixed Aliyun OSS assets, or designing in-app updates. Resolve the actual project contract first, then apply the fixed workspace delivery defaults for every workspace-owned client binary.
 
 ## Select The Stack
 
@@ -9,9 +9,9 @@ Prefer the current repository stack and its official packaging/update path. Comp
 | Product shape | Prefer | Require before choosing |
 |---|---|---|
 | CLI or library installed by a language ecosystem | Native registry and package manager | A published package, one canonical package/version owner, supported global/tool installation, and official upgrade semantics |
-| Desktop web UI with existing Electron/Tauri/Wails/native shell | Existing framework packager and updater | Supported OS/architecture output, signing, hidden helper execution, restart/activation behavior, and rollback evidence |
+| Desktop web UI with existing Electron/Tauri/Wails/native shell | Existing framework packager and updater | Supported OS/architecture output, signing, hidden helper execution, restart/activation behavior, and post-activation recovery evidence |
 | Native desktop client | Existing OS-native installer/toolchain | Real OS integration, prerequisites, service/helper, repair/uninstall, or offline requirements |
-| Store-managed client | Platform store | Store rules, signing, staged rollout, update ownership, and rollback limitations |
+| Store-managed client | Platform store | Store rules, signing, staged rollout, update ownership, and recovery limitations |
 | Large multi-component client | Stable thin launcher plus manifest components | Proven need for independent payload reuse, first-run network behavior, compatibility bridge, and recovery |
 
 Do not introduce another runtime, UI shell, installer framework, updater service, or release stream for familiarity alone. Record build size, installed size, prerequisites, signing support, cross-platform cost, update ownership, process behavior, and long-term maintenance for a material choice.
@@ -27,21 +27,23 @@ Use the project's established builder first. Common candidates to verify against
 5. Sign/notarize where the product contract requires it. Calculate size and SHA-256 after final signing because signing changes bytes.
 6. Install the exact artifact on a clean supported environment; launch the installed binary and verify registration, shortcut, repair/repeat install, uninstall boundary, first-run bootstrap, and no transient terminal or second frontend window.
 
-## Publish GitHub Release And First-Install Mirrors
+On Windows, use a current-user MSI by default when the product owns no Service, driver, machine-wide shared resource, or privileged prerequisite. Escalate to machine-wide installation only for a verified platform requirement. After `InstallFinalize`, run one Launcher setup; request normal shutdown for old product processes, wait five seconds, and terminate only executables verified inside the installation root. Preserve registration, settings, and business state across repair and in-place upgrade.
 
-Use a versioned Git tag and one GitHub Release as the canonical human-download record unless the project names a different release owner. Build one frozen platform matrix, create the Release as a draft, attach immutable installers with unambiguous OS/architecture names, one checksum manifest, signatures/provenance, and concise install/upgrade notes, then read every asset back through the GitHub API. Create or update the Release only through the project's authorized release workflow; never overwrite an existing version's different bytes.
+## Publish Fixed Aliyun OSS Assets
 
-When GitHub reachability is insufficient for first install, mirror the exact final installer bytes to OSS or another named object store:
+Use the `https` scheme with the fixed OSS host `shared-public-assets.oss-cn-beijing.aliyuncs.com`; publish every workspace-owned Installer, Bootstrap, manifest, component payload, checksum, and third-party fallback below `<project-prefix>/`. GitHub may hold source, tags, release notes, and optional automation, but it must not store release binaries.
 
-1. Upload the already-built GitHub Release candidate; never rebuild per channel.
-2. Use immutable versioned object keys and retain the same filename, version, byte size, SHA-256, and signature.
-3. Read both channels back anonymously and compare bytes or digest before advertising either link.
-4. Publish the GitHub draft and update any mutable first-install index only after all promised installer channels are readable and verified.
-5. Treat an unavailable mirror as a publication failure before the Release/index commit, not as permission to publish different bytes or expose only part of the platform matrix.
+Use one frozen candidate and one OSS publication transaction:
 
-GitHub Release and OSS are acquisition channels. They do not automatically define the later in-app update protocol.
+1. Verify the named OSS publishing environment, required configuration, project-prefix write access, and anonymous read-back with a disposable project-scoped probe without logging secret values.
+2. Freeze version, bytes, object keys, size, SHA-256, platform, architecture, and signature/provenance.
+3. Upload immutable versioned objects and read each back anonymously.
+4. Commit the one mutable Bootstrap only after the complete closure is readable.
+5. On failure, retain immutable objects for retry and keep the old Bootstrap; never rebuild the same version or substitute another origin.
 
-An OSS installer mirror improves only installer reachability. If first run still fetches a capability from npm or another registry, separately prove that registry is reachable and owned by the product configuration. Otherwise bundle the exact package/archive in the installer and let the official package manager install it from that local immutable input when the package manager supports this. Do not silently replace registry configuration, build a different package for OSS, or claim offline first run when network dependencies remain.
+Release-note download links point to OSS. A GitHub Workflow may invoke the same local publisher but cannot become its sole owner. Do not create an OSS mirror, GitHub fallback, or second permanent binary origin.
+
+If first run would otherwise fetch an application-managed capability from npm or another registry, publish the exact package/archive to OSS and let the official package manager install it from that local immutable input when supported. Do not silently replace global registry configuration or claim offline first run when network dependencies remain. Independently package-managed or store-owned components keep their official update owner.
 
 ## Select The Update Owner
 
@@ -54,14 +56,14 @@ Match updates to the actual installation source and official ecosystem mechanism
 | Cargo install | Cargo or an established project-approved updater | Use the supported crate/update path; do not assume self-update exists |
 | .NET global tool | `dotnet tool update` | Preserve source and tool-path rules |
 | Homebrew/Winget/Chocolatey/store | That system/store owner | Deep-link or invoke only the supported noninteractive update path |
-| Electron/Tauri/Wails/native packaged app | Existing framework/platform updater or stable launcher | Use its signed feed, staging, activation, restart, and rollback contract |
+| Electron/Tauri/Wails/native packaged app | Existing framework/platform updater or stable launcher | Use its signed feed, staging, activation, restart, and project-owned recovery contract |
 | Thin multi-component client | Existing launcher/updater | Manifest-driven component preparation and atomic activation |
 
 `npm update` is an example, not a universal rule. For a global CLI, the correct operation may be `npm install -g <package>@latest`; for a locally pinned dependency, changing the project lockfile may be a Development operation rather than an end-user client update. Verify the official command and its version semantics from the project's package manager and current install layout.
 
 Prefer a non-mutating official metadata/API check, then update the exact version the user accepted so the target cannot change between check and install. For npm this may mean resolving the registry version first and installing `<package>@<resolved-version>` in the same global or private prefix that owns the current package. Use `npm update` only when its documented scope, dependency range, prefix, and target semantics match the installed component.
 
-Do not add a custom GitHub/OSS asset downloader when the official package manager, store, framework updater, or launcher already owns update discovery and installation. If first install came from an installer but runtime components are officially package-managed, record that split explicitly and keep one owner per component.
+Do not add a custom release-asset downloader when the official package manager, store, framework updater, or launcher already owns update discovery and installation. If first install came from an installer but runtime components are officially package-managed, record that split explicitly and keep one owner per component.
 
 Keep application, installer/launcher, and managed capability versions separate when they release independently. Each has one canonical version owner and compatibility relation; a normal capability update must not rewrite the installer or application version unless their owned behavior or compatibility bridge changes.
 
@@ -70,7 +72,7 @@ Keep application, installer/launcher, and managed capability versions separate w
 Default to a deliberate two-step interaction:
 
 1. `Check for updates` performs a bounded read-only check. Show current version and one result: up to date, update available with target version, or failed with retry. It must not install, restart, or alter active work.
-2. `Update now` appears only when an update is available. Before starting, show download/restart requirements and whether active work must finish. Allow defer; allow cancellation until the official updater's safe commit boundary.
+2. For a Manager-style desktop UI, reuse the same fixed primary control for the applicable explicit update intent only when an update is available or staged. Before starting, show download/restart requirements and whether active work must finish. Disable the control while loading, checking, or updating; periodic responses must not unlock foreground work early. Allow defer and cancellation until the updater's safe commit boundary.
 
 Represent only states that change user action or recovery:
 
@@ -91,13 +93,16 @@ Do not blindly copy a flag across runtimes. Read the actual process API and adja
 
 Do not interrupt sessions, jobs, terminals, uploads, or unsaved work. Download/stage while the app remains usable when the owner supports it. Drain new work only before activation, then ask for restart confirmation. If live activation is safe and officially supported, preserve UI state and report completion without inventing a restart.
 
+For launcher-managed desktop clients, check at Launcher startup and about every six hours while the Manager runs. Download, verify, and stage automatically, but create no Service or scheduled task after exit and never activate without the required user confirmation.
+
 ## Verify The User Contract
 
 - Repeated check clicks coalesce or disable correctly; a stale response cannot overwrite a newer one.
 - Check-only never mutates installed state.
 - Update cannot start without an available compatible target.
-- Progress, cancellation, failure, retry, waiting-for-drain, restart, health, and rollback are visible in the existing UI.
+- Progress, cancellation, failure, retry, waiting-for-drain, restart, health, and the selected recovery result are visible in the existing UI.
 - Background execution produces no `cmd`, PowerShell, terminal, installer shell, or duplicate frontend flash.
-- Active work and user data survive failure, defer, restart, and rollback.
+- Active work and user data survive failure, defer, restart, and the selected recovery behavior.
 - Installed version after success matches the official registry/feed/store and the UI's reported version.
-- First-install GitHub and OSS artifacts remain identical and are tested separately from in-app update behavior.
+- Installer, manifest, payload, and fallback objects are anonymously readable from their exact OSS keys; GitHub has no release binary assets.
+- An OSS outage produces a diagnosable source failure without fallback and leaves the current version and user data intact.
