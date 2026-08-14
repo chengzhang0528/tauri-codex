@@ -11,12 +11,21 @@ static NEXT_OPERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TargetIdentity {
+    pub bootstrap_sha256: String,
+    pub artifact_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct Transaction {
     pub schema_version: u32,
     pub operation_id: String,
     pub state: UpdateState,
     pub trigger: CheckTrigger,
     pub target: Option<UpdateTarget>,
+    #[serde(default)]
+    pub target_identity: Option<TargetIdentity>,
     pub phase: String,
     pub component: String,
     pub downloaded: u64,
@@ -33,6 +42,7 @@ impl Default for Transaction {
             state: UpdateState::Idle,
             trigger: CheckTrigger::Manual,
             target: None,
+            target_identity: None,
             phase: "idle".to_string(),
             component: String::new(),
             downloaded: 0,
@@ -83,6 +93,7 @@ pub fn recover(
     root: &Path,
     mut transaction: Transaction,
     installer_version: &str,
+    current_release_healthy: bool,
 ) -> Result<Transaction, String> {
     let original = transaction.clone();
     match transaction.state {
@@ -105,7 +116,8 @@ pub fn recover(
         UpdateState::Activating | UpdateState::HealthCheck => {
             let activated = match transaction.target.as_ref() {
                 Some(UpdateTarget::Release { version }) => {
-                    activation::current_release_version(root)?.as_deref() == Some(version)
+                    current_release_healthy
+                        && activation::current_release_version(root)?.as_deref() == Some(version)
                 }
                 Some(UpdateTarget::Installer { version }) => {
                     !super::contract::newer(version, installer_version)?
@@ -119,9 +131,9 @@ pub fn recover(
             } else {
                 finish(
                     &mut transaction,
-                    UpdateState::Failed,
-                    "interrupted-activation",
-                    Some("上次激活未完成，可以重新准备目标".to_string()),
+                    UpdateState::RepairRequired,
+                    "repair-required",
+                    Some("上次激活未完成，需要 forward-repair 目标".to_string()),
                 );
             }
         }
@@ -182,6 +194,7 @@ pub fn begin(
         state,
         trigger,
         target,
+        target_identity: None,
         phase: phase.to_string(),
         component: String::new(),
         downloaded: 0,
@@ -229,7 +242,7 @@ mod tests {
             "downloading",
         );
         save(&root, &transaction).unwrap();
-        let recovered = recover(&root, load(&root).unwrap(), "1.1.0").unwrap();
+        let recovered = recover(&root, load(&root).unwrap(), "1.1.0", false).unwrap();
         assert_eq!(recovered.state, UpdateState::Failed);
         assert_eq!(recovered.target, transaction.target);
         assert_eq!(load(&root).unwrap(), recovered);
@@ -247,8 +260,27 @@ mod tests {
             UpdateState::WaitingForDrain,
             "waiting-for-drain",
         );
-        let recovered = recover(&root, transaction, "1.1.0").unwrap();
+        let recovered = recover(&root, transaction, "1.1.0", false).unwrap();
         assert_eq!(recovered.state, UpdateState::Staged);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_activation_requires_forward_repair_when_current_is_unhealthy() {
+        let root = fixture();
+        let transaction = begin(
+            CheckTrigger::Manual,
+            Some(UpdateTarget::Release {
+                version: "0.2.1".to_string(),
+            }),
+            UpdateState::HealthCheck,
+            "health-check",
+        );
+
+        let recovered = recover(&root, transaction, "1.1.0", false).unwrap();
+
+        assert_eq!(recovered.state, UpdateState::RepairRequired);
+        assert_eq!(recovered.phase, "repair-required");
         fs::remove_dir_all(root).unwrap();
     }
 }

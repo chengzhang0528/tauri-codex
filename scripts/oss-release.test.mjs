@@ -103,12 +103,18 @@ function fakeFetch(options = {}) {
       events.push(`get:${key}`);
       if (options.failGet === key) return new Response("injected", { status: 500 });
       const bytes = objects.get(key);
-      return new Response(bytes ?? "missing", { status: bytes ? 200 : 404 });
+      return new Response(bytes ?? "missing", { status: bytes ? 200 : 404, headers: bytes ? { etag: `"${digest(bytes)}"` } : undefined });
     }
     if (key && method === "PUT") {
       events.push(`put:${key}`);
       if (options.failPut === key) return new Response("injected", { status: 500 });
+      if (options.beforeConditionalPut === key) {
+        objects.set(key, options.raceBytes);
+        options.beforeConditionalPut = null;
+      }
       if (init.headers["x-oss-forbid-overwrite"] === "true" && objects.has(key)) return new Response("exists", { status: 409 });
+      if (init.headers["If-Match"] && (!objects.has(key) || init.headers["If-Match"] !== `"${digest(objects.get(key))}"`)) return new Response("changed", { status: 412 });
+      if (init.headers["If-None-Match"] === "*" && objects.has(key)) return new Response("exists", { status: 412 });
       objects.set(key, Buffer.from(init.body));
       return new Response("", { status: 200 });
     }
@@ -144,6 +150,19 @@ test("publisher admission proves public readback and removes its exact probe", a
     "get:probes/tauri-codex-run-1.txt",
   ]);
   assert.equal(remote.objects.size, 0);
+});
+
+test("publisher admission removes its exact probe after readback failure", async () => {
+  const key = "probes/tauri-codex-run-failed.txt";
+  const remote = fakeFetch({ failGet: key });
+
+  await assert.rejects(
+    () => preflightPublisher({ accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, probeId: "run-failed" }),
+    /HTTP 500/,
+  );
+
+  assert.equal(remote.objects.has(key), false);
+  assert.equal(remote.events.includes(`delete:${key}`), true);
 });
 
 test("stages immutable objects without moving Bootstrap", async () => {
@@ -241,5 +260,70 @@ test("commit rejects a signed Bootstrap downgrade", async () => {
   } finally {
     rmSync(current.root, { recursive: true, force: true });
     rmSync(older.root, { recursive: true, force: true });
+  }
+});
+
+test("commit rejects an Installer downgrade even when release advances", async () => {
+  const current = fixture("0.2.0", "1.2.0");
+  const next = fixture("0.2.1", "1.1.0");
+  const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
+  for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
+  const remote = fakeFetch({ objects });
+  try {
+    await assert.rejects(() => commitRelease(publishOptions(next, remote)), /Installer downgrade/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), current.bootstrapBytes);
+  } finally {
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(next.root, { recursive: true, force: true });
+  }
+});
+
+test("commit rejects different Bootstrap bytes for the same release version", async () => {
+  const current = fixture("0.2.0", "1.1.0");
+  const replacement = fixture("0.2.0", "1.2.0");
+  const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
+  for (const item of replacement.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(replacement.root, item.localPath)) : replacement.blobs.installer]);
+  const remote = fakeFetch({ objects });
+  try {
+    await assert.rejects(() => commitRelease(publishOptions(replacement, remote)), /same-version Bootstrap replacement/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), current.bootstrapBytes);
+  } finally {
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(replacement.root, { recursive: true, force: true });
+  }
+});
+
+test("conditional Bootstrap commit rejects a concurrent writer", async () => {
+  const current = fixture("0.1.9", "1.0.9");
+  const next = fixture("0.2.0", "1.1.0");
+  const racing = fixture("0.3.0", "1.2.0");
+  const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
+  for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
+  const remote = fakeFetch({ objects, beforeConditionalPut: OSS_BOOTSTRAP_KEY, raceBytes: racing.bootstrapBytes });
+  try {
+    await assert.rejects(() => commitRelease(publishOptions(next, remote)), /HTTP 412/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), racing.bootstrapBytes);
+  } finally {
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(next.root, { recursive: true, force: true });
+    rmSync(racing.root, { recursive: true, force: true });
+  }
+});
+
+test("commit rejects a signed but malformed current Bootstrap", async () => {
+  const current = fixture("0.1.9", "1.0.9");
+  const next = fixture("0.2.0", "1.1.0");
+  const currentPayload = JSON.parse(current.bootstrapBytes.toString("utf8")).payload;
+  currentPayload.release.version = "invalid";
+  const malformed = jsonBytes(signEnvelope(currentPayload, trust));
+  const objects = [[OSS_BOOTSTRAP_KEY, malformed]];
+  for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
+  const remote = fakeFetch({ objects });
+  try {
+    await assert.rejects(() => commitRelease(publishOptions(next, remote)), /Bootstrap release version/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), malformed);
+  } finally {
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(next.root, { recursive: true, force: true });
   }
 });

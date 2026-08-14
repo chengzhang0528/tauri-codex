@@ -1,5 +1,6 @@
 {
   "schemaVersion": 2,
   "installerVersion": "1.1.0",
+  "minimumManagerVersion": "0.2.0",
   "publishedArtifact": null
 }

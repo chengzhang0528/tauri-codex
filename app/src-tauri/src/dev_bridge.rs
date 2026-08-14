@@ -224,7 +224,7 @@ fn dispatch(app: &AppHandle, state: &AppState, call: BridgeCall) -> Result<Value
         "check_update" => value(commands::check_update()?),
         "prepare_update" => value(commands::prepare_update()?),
         "activate_update" => value(commands::activate_update_inner(state)?),
-        "cancel_update" => value(commands::cancel_update()?),
+        "cancel_update" => value(commands::cancel_update_inner(state)?),
         _ => Err(format!("浏览器开发桥接不支持命令：{}", call.command)),
     }
 }

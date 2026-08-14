@@ -35,6 +35,12 @@ struct RuntimeSession {
 #[derive(Clone, Default)]
 pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<RuntimeSession>>>>,
+    drain: Arc<Mutex<SessionDrain>>,
+}
+
+#[derive(Default)]
+struct SessionDrain {
+    requested: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -80,7 +86,55 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
+    pub fn begin_update_drain(&self) -> Result<usize, String> {
+        let mut drain = self
+            .drain
+            .lock()
+            .map_err(|_| "会话 drain 锁已损坏".to_string())?;
+        drain.requested = true;
+        match self.sessions.lock() {
+            Ok(sessions) => Ok(sessions.len()),
+            Err(_) => {
+                drain.requested = false;
+                Err("会话锁已损坏".to_string())
+            }
+        }
+    }
+
+    pub fn cancel_update_drain(&self) {
+        let mut drain = self
+            .drain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        drain.requested = false;
+    }
+
+    #[cfg(test)]
+    fn update_drain_requested(&self) -> bool {
+        self.drain
+            .lock()
+            .map(|drain| drain.requested)
+            .unwrap_or(true)
+    }
+
     pub fn start(
+        &self,
+        app: &AppHandle,
+        workdir: &Path,
+        server: &ServerProfile,
+        resume: bool,
+    ) -> Result<TerminalInstance, String> {
+        let drain = self
+            .drain
+            .lock()
+            .map_err(|_| "会话 drain 锁已损坏".to_string())?;
+        if drain.requested {
+            return Err("更新正在等待当前会话结束，暂时不能启动新会话".to_string());
+        }
+        self.start_admitted(app, workdir, server, resume)
+    }
+
+    fn start_admitted(
         &self,
         app: &AppHandle,
         workdir: &Path,
@@ -296,12 +350,19 @@ impl SessionManager {
         id: &str,
         server: &ServerProfile,
     ) -> Result<TerminalInstance, String> {
+        let drain = self
+            .drain
+            .lock()
+            .map_err(|_| "会话 drain 锁已损坏".to_string())?;
+        if drain.requested {
+            return Err("更新正在等待当前会话结束，暂时不能重启会话".to_string());
+        }
         let session = self.session(id)?;
         let workdir = PathBuf::from(session.instance.workdir.clone());
         let resume = session.instance.resume;
-        self.terminate(id).ok();
+        self.terminate(id)?;
         self.remove(id);
-        self.start(app, &workdir, server, resume)
+        self.start_admitted(app, &workdir, server, resume)
     }
 
     fn remove(&self, id: &str) {
@@ -651,4 +712,20 @@ fn spawn_host_reader(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionManager;
+
+    #[test]
+    fn update_drain_gate_closes_and_reopens_session_admission() {
+        let sessions = SessionManager::default();
+
+        assert_eq!(sessions.begin_update_drain().unwrap(), 0);
+        assert!(sessions.update_drain_requested());
+
+        sessions.cancel_update_drain();
+        assert!(!sessions.update_drain_requested());
+    }
 }

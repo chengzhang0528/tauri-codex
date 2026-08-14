@@ -26,8 +26,9 @@ test("Manager and Installer versions have independent canonical owners", () => {
   assert.equal(lock.version, app.version);
   assert.equal(lock.packages[""].version, app.version);
   assert.match(cargo, new RegExp(`^version = "${app.version.replaceAll(".", "\\.")}"$`, "m"));
-  assert.deepEqual(installer, { schemaVersion: 2, installerVersion: "1.1.0", publishedArtifact: null });
+  assert.deepEqual(installer, { schemaVersion: 2, installerVersion: "1.1.0", minimumManagerVersion: "0.2.0", publishedArtifact: null });
   assert.equal(tauri.version, installer.installerVersion);
+  assert.equal(installer.minimumManagerVersion, "0.2.0");
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
     "../../THIRD_PARTY_NOTICES.md",
@@ -69,6 +70,10 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.match(pipeline, /--bin",\s*"tauri-codex-manager"/);
   assert.match(pipeline, /WebView2Loader\.dll/);
   assert.match(pipeline, /dist", "launcher\.html"/);
+  assert.match(pipeline, /status === "404"/);
+  assert.match(pipeline, /minimumManagerVersion:\s*minimumManagerVersion/);
+  assert.doesNotMatch(pipeline, /minimumManagerVersion:\s*appVersion/);
+  assert.doesNotMatch(pipeline, /probePublishedInstaller\(\)[\s\S]{0,800}catch\s*\{/);
   assert.match(managerMain, /compile_error!/);
 });
 

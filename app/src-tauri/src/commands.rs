@@ -663,9 +663,14 @@ pub fn activate_update(app: AppHandle, state: State<'_, AppState>) -> Result<Upd
 }
 
 pub(crate) fn activate_update_inner(state: &AppState) -> Result<UpdateResult, String> {
-    let snapshot = delivery::manager_intent(UpdateIntent::Activate {
-        active_sessions: active_instance_count(state),
-    })?;
+    let active_sessions = state.sessions.begin_update_drain()?;
+    let snapshot = match delivery::manager_intent(UpdateIntent::Activate { active_sessions }) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            state.sessions.cancel_update_drain();
+            return Err(error);
+        }
+    };
     Ok(UpdateResult {
         state: snapshot.state,
         target: snapshot.target,
@@ -676,12 +681,37 @@ pub(crate) fn activate_update_inner(state: &AppState) -> Result<UpdateResult, St
 }
 
 #[tauri::command]
-pub fn cancel_update() -> Result<delivery::DeliverySnapshot, String> {
-    delivery::manager_intent(UpdateIntent::Cancel)
+pub fn cancel_update(state: State<'_, AppState>) -> Result<delivery::DeliverySnapshot, String> {
+    cancel_update_inner(state.inner())
 }
 
-fn active_instance_count(state: &AppState) -> usize {
-    state.sessions.active_count()
+pub(crate) fn cancel_update_inner(state: &AppState) -> Result<delivery::DeliverySnapshot, String> {
+    let result = delivery::manager_intent(UpdateIntent::Cancel);
+    match result {
+        Ok(snapshot) => {
+            if !matches!(
+                snapshot.state,
+                UpdateState::Activating | UpdateState::HealthCheck
+            ) {
+                state.sessions.cancel_update_drain();
+            }
+            Ok(snapshot)
+        }
+        Err(error) => {
+            let broker_in_activation = delivery::manager_snapshot()
+                .map(|snapshot| {
+                    matches!(
+                        snapshot.state,
+                        UpdateState::Activating | UpdateState::HealthCheck
+                    )
+                })
+                .unwrap_or(false);
+            if !broker_in_activation {
+                state.sessions.cancel_update_drain();
+            }
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -46,16 +46,23 @@ async function responseBytes(response, label) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-async function getObject(fetchImpl, baseURL, key) {
+async function getObjectRecord(fetchImpl, baseURL, key) {
   const response = await fetchImpl(`${baseURL}/${key}`, { headers: { "User-Agent": "tauri-codex-release-publisher" }, redirect: "error" });
   if (response.status === 404) return null;
-  return responseBytes(response, `OSS ${key}`);
+  return { bytes: await responseBytes(response, `OSS ${key}`), etag: response.headers.get("etag") };
 }
 
-async function putObject(fetchImpl, config, key, bytes, immutable) {
+async function getObject(fetchImpl, baseURL, key) {
+  const record = await getObjectRecord(fetchImpl, baseURL, key);
+  return record?.bytes ?? null;
+}
+
+async function putObject(fetchImpl, config, key, bytes, immutable, conditions = {}) {
   const date = new Date().toUTCString(); const base = new URL(config.baseURL); const type = contentType(key);
   const headers = { "Content-Type": type, Date: date, Authorization: ossAuthorization({ method: "PUT", contentType: type, date, key, secret: config.accessKeySecret, accessKeyId: config.accessKeyId, immutable, basePath: base.pathname.replace(/\/$/, ""), bucket: config.bucket }) };
   if (immutable) headers["x-oss-forbid-overwrite"] = "true";
+  if (conditions.ifMatch) headers["If-Match"] = conditions.ifMatch;
+  if (conditions.ifNoneMatch) headers["If-None-Match"] = "*";
   const response = await fetchImpl(`${config.baseURL}/${key}`, { method: "PUT", headers, body: bytes, redirect: "error" });
   if (!(response.ok || (immutable && response.status === 409))) throw new Error(`OSS PUT ${key} returned HTTP ${response.status}`);
 }
@@ -98,6 +105,45 @@ function sameArtifact(left, right) {
   return left?.objectKey === right?.objectKey && left?.size === right?.size && left?.sha256 === right?.sha256 && left?.provenance === right?.provenance;
 }
 
+function validateManifestPayload(manifest, candidate) {
+  if (!stableVersion.test(manifest.minimumLauncherVersion) || !stableVersion.test(manifest.minimumManagerVersion) || !Array.isArray(manifest.components)) throw new Error("manifest compatibility fields 无效");
+  if (compareVersions(manifest.minimumLauncherVersion, candidate.installerVersion) > 0) throw new Error("manifest minimumLauncherVersion 超出 candidate Installer");
+  const ids = new Set();
+  const expected = { manager: ["archive", "zip", "manager"], codex: ["archive", "zip", "codex"], node: ["system", "msi", "system"] };
+  for (const component of manifest.components) {
+    if (!component || !expected[component.id] || ids.has(component.id)) throw new Error("manifest component ID 不唯一或未知");
+    ids.add(component.id);
+    const [kind, archive, installPath] = expected[component.id];
+    if (!stableVersion.test(component.version) || component.kind !== kind || component.archive !== archive || component.installPath !== installPath || component.required !== true || component.provenance !== "authenticode+ed25519") throw new Error(`manifest ${component.id} 规则无效`);
+    validateArtifact(component.artifact, `releases/${candidate.version}/windows-x64/components/`);
+    if (component.artifact.provenance !== component.provenance) throw new Error(`manifest ${component.id} provenance 不一致`);
+    if (component.id === "manager" && component.version !== candidate.version) throw new Error("manifest Manager version 与 release 不一致");
+  }
+  for (const id of Object.keys(expected)) if (!ids.has(id)) throw new Error(`manifest 缺少必需 ${id}`);
+  if (compareVersions(manifest.minimumManagerVersion, manifest.components.find((component) => component.id === "manager").version) > 0) throw new Error("manifest minimumManagerVersion 超出 Manager");
+}
+
+function validatePublishedBootstrap(bootstrap) {
+  if (bootstrap?.product !== "tauri-codex" || bootstrap.platform !== "windows" || bootstrap.architecture !== "x86_64" || !stableVersion.test(bootstrap.minimumLauncherVersion)) throw new Error("Bootstrap platform/compatibility 规则无效");
+  if (!bootstrap.installer || !stableVersion.test(bootstrap.installer.version) || compareVersions(bootstrap.minimumLauncherVersion, bootstrap.installer.version) > 0) throw new Error("Bootstrap Installer version 无效");
+  validateArtifact(bootstrap.installer.artifact, `installers/${bootstrap.installer.version}/windows-x64/`);
+  if (bootstrap.installer.artifact.provenance !== "authenticode+ed25519") throw new Error("Bootstrap Installer provenance 无效");
+  if (!bootstrap.release || !stableVersion.test(bootstrap.release.version)) throw new Error("Bootstrap release version 无效");
+  validateArtifact(bootstrap.release.manifest, `releases/${bootstrap.release.version}/windows-x64/`);
+  if (bootstrap.release.manifest.objectKey !== `releases/${bootstrap.release.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
+}
+
+function validateBootstrapPayload(bootstrap, candidate) {
+  validatePublishedBootstrap(bootstrap);
+  if (bootstrap.product !== candidate.product || bootstrap.platform !== candidate.platform || bootstrap.architecture !== candidate.architecture || !stableVersion.test(bootstrap.minimumLauncherVersion) || compareVersions(bootstrap.minimumLauncherVersion, candidate.installerVersion) > 0) throw new Error("Bootstrap compatibility 规则无效");
+  if (!bootstrap.installer || bootstrap.installer.version !== candidate.installerVersion) throw new Error("Bootstrap Installer identity 无效");
+  validateArtifact(bootstrap.installer.artifact, `installers/${candidate.installerVersion}/windows-x64/`);
+  if (bootstrap.installer.artifact.provenance !== "authenticode+ed25519") throw new Error("Bootstrap Installer provenance 无效");
+  if (!bootstrap.release || bootstrap.release.version !== candidate.version) throw new Error("Bootstrap release identity 无效");
+  validateArtifact(bootstrap.release.manifest, `releases/${candidate.version}/windows-x64/`);
+  if (bootstrap.release.manifest.objectKey !== `releases/${candidate.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
+}
+
 function loadCandidate(releaseRoot, trust) {
   const candidateEnvelope = JSON.parse(readFileSync(path.join(releaseRoot, "candidate.json"), "utf8"));
   const candidate = verifySignedEnvelope(candidateEnvelope, trust, "candidate");
@@ -106,6 +152,7 @@ function loadCandidate(releaseRoot, trust) {
   if (bootstrapBytes.length !== candidate.bootstrap.size || sha256(bootstrapBytes) !== candidate.bootstrap.sha256) throw new Error("frozen Bootstrap bytes 已变化");
   const bootstrap = verifySignedEnvelope(JSON.parse(bootstrapBytes.toString("utf8")), trust, "Bootstrap");
   if (bootstrap.product !== candidate.product || bootstrap.platform !== candidate.platform || bootstrap.architecture !== candidate.architecture || bootstrap.release?.version !== candidate.version || bootstrap.installer?.version !== candidate.installerVersion) throw new Error("Bootstrap 与 candidate identity 不一致");
+  validateBootstrapPayload(bootstrap, candidate);
   const roles = candidate.immutable.map((item) => item.role);
   if (roles.length !== 5 || new Set(roles).size !== roles.length || !["manifest", "manager", "codex", "node", "installer"].every((role) => roles.includes(role))) throw new Error("candidate immutable roles 不完整");
   const immutable = candidate.immutable.map((item) => {
@@ -122,6 +169,7 @@ function loadCandidate(releaseRoot, trust) {
   if (!sameArtifact(bootstrap.release.manifest, manifestItem.artifact) || !sameArtifact(bootstrap.installer.artifact, installerItem.artifact)) throw new Error("Bootstrap artifact closure 与 candidate 不一致");
   const manifest = verifySignedEnvelope(JSON.parse(manifestItem.bytes.toString("utf8")), trust, "manifest");
   if (manifest.product !== candidate.product || manifest.version !== candidate.version || manifest.platform !== candidate.platform || manifest.architecture !== candidate.architecture) throw new Error("manifest 与 candidate identity 不一致");
+  validateManifestPayload(manifest, candidate);
   for (const role of ["manager", "codex", "node"]) {
     const item = immutable.find((entry) => entry.role === role);
     const component = manifest.components?.find((entry) => entry.id === role && entry.required === true);
@@ -138,7 +186,18 @@ async function verifyObject(fetchImpl, config, artifact, label) {
 
 export async function preflightPublisher({ accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET, probeId = randomUUID() }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const key = `probes/tauri-codex-${probeId}.txt`; const bytes = Buffer.from(`tauri-codex OSS probe ${probeId}\n`);
-  await putObject(fetchImpl, config, key, bytes, true); const readback = await getObject(fetchImpl, baseURL, key); if (!readback?.equals(bytes)) throw new Error("OSS probe anonymous readback mismatch"); await deleteObject(fetchImpl, config, key); if (await getObject(fetchImpl, baseURL, key)) throw new Error("OSS probe cleanup failed"); return { admitted: true, key };
+  await putObject(fetchImpl, config, key, bytes, true);
+  let admissionError;
+  try {
+    const readback = await getObject(fetchImpl, baseURL, key);
+    if (!readback?.equals(bytes)) throw new Error("OSS probe anonymous readback mismatch");
+  } catch (error) {
+    admissionError = error;
+  }
+  await deleteObject(fetchImpl, config, key);
+  if (await getObject(fetchImpl, baseURL, key)) throw new Error("OSS probe cleanup failed");
+  if (admissionError) throw admissionError;
+  return { admitted: true, key };
 }
 
 export async function stageRelease({ releaseRoot, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
@@ -153,13 +212,26 @@ export async function stageRelease({ releaseRoot, accessKeyId, accessKeySecret, 
 export async function commitRelease({ releaseRoot, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
-  const current = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
+  const nextPayload = verifySignedEnvelope(nextEnvelope, trust, "next Bootstrap");
   if (current) {
-    const currentEnvelope = JSON.parse(current.toString("utf8")); const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
-    const currentVersion = verifySignedEnvelope(currentEnvelope, trust, "current Bootstrap")?.release?.version; const nextVersion = verifySignedEnvelope(nextEnvelope, trust, "next Bootstrap")?.release?.version;
+    const currentEnvelope = JSON.parse(current.bytes.toString("utf8"));
+    const currentPayload = verifySignedEnvelope(currentEnvelope, trust, "current Bootstrap");
+    validatePublishedBootstrap(currentPayload);
+    const currentVersion = currentPayload?.release?.version;
+    const nextVersion = nextPayload?.release?.version;
+    const currentInstallerVersion = currentPayload?.installer?.version;
+    const nextInstallerVersion = nextPayload?.installer?.version;
     if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) < 0) throw new Error(`refusing Bootstrap downgrade ${currentVersion} -> ${nextVersion}`);
+    if (currentInstallerVersion && nextInstallerVersion && stableVersion.test(currentInstallerVersion) && stableVersion.test(nextInstallerVersion) && compareVersions(nextInstallerVersion, currentInstallerVersion) < 0) throw new Error(`refusing Installer downgrade ${currentInstallerVersion} -> ${nextInstallerVersion}`);
+    if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) === 0 && !current.bytes.equals(release.bootstrapBytes)) throw new Error(`refusing same-version Bootstrap replacement ${nextVersion}`);
+    if (current.bytes.equals(release.bootstrapBytes)) return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY, idempotent: true };
+    if (!current.etag) throw new Error("current Bootstrap 缺少 ETag，拒绝无条件覆盖");
+    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifMatch: current.etag });
+  } else {
+    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifNoneMatch: true });
   }
-  await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false);
   const confirmed = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY); if (!confirmed?.equals(release.bootstrapBytes)) throw new Error("OSS Bootstrap commit readback mismatch");
   return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
 }

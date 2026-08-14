@@ -1,7 +1,7 @@
 use super::contract::{DeliverySnapshot, UpdateIntent};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::sync::{mpsc::Sender, Arc};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\tauri-codex-delivery-v2";
 const MAX_MESSAGE: usize = 1024 * 1024;
@@ -22,15 +22,19 @@ pub enum Response {
     Pong,
 }
 
-pub fn serve(handler: Arc<dyn Fn(Request) -> Response + Send + Sync>) -> Result<(), String> {
+pub fn serve_with_ready(
+    handler: Arc<dyn Fn(Request) -> Response + Send + Sync>,
+    ready: Sender<Result<(), String>>,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
-        serve_windows(handler)
+        serve_windows(handler, Some(ready))
     }
     #[cfg(not(windows))]
     {
-        let _ = handler;
-        Err("Launcher Broker 只支持 Windows Named Pipe".to_string())
+        let error = "Launcher Broker 只支持 Windows Named Pipe".to_string();
+        let _ = ready.send(Err(error.clone()));
+        Err(error)
     }
 }
 
@@ -47,7 +51,10 @@ pub fn request(request: Request) -> Result<Response, String> {
 }
 
 #[cfg(windows)]
-fn serve_windows(handler: Arc<dyn Fn(Request) -> Response + Send + Sync>) -> Result<(), String> {
+fn serve_windows(
+    handler: Arc<dyn Fn(Request) -> Response + Send + Sync>,
+    mut ready: Option<Sender<Result<(), String>>>,
+) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows::core::PCWSTR;
@@ -57,7 +64,15 @@ fn serve_windows(handler: Arc<dyn Fn(Request) -> Response + Send + Sync>) -> Res
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
         PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
     };
-    let security = security_attributes()?;
+    let security = match security_attributes() {
+        Ok(security) => security,
+        Err(error) => {
+            if let Some(sender) = ready.take() {
+                let _ = sender.send(Err(error.clone()));
+            }
+            return Err(error);
+        }
+    };
     let name = std::ffi::OsStr::new(PIPE_NAME)
         .encode_wide()
         .chain(Some(0))
@@ -76,10 +91,17 @@ fn serve_windows(handler: Arc<dyn Fn(Request) -> Response + Send + Sync>) -> Res
             )
         };
         if handle.is_invalid() {
-            return Err(format!(
+            let error = format!(
                 "创建 Named Pipe 失败：{}",
                 windows::core::Error::from_win32()
-            ));
+            );
+            if let Some(sender) = ready.take() {
+                let _ = sender.send(Err(error.clone()));
+            }
+            return Err(error);
+        }
+        if let Some(sender) = ready.take() {
+            let _ = sender.send(Ok(()));
         }
         let connected = unsafe { ConnectNamedPipe(handle, None) };
         if let Err(error) = connected {

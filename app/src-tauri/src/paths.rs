@@ -88,44 +88,20 @@ pub fn codex_version(app: &AppHandle) -> Result<Option<String>, String> {
 }
 
 pub fn system_node() -> Result<PathBuf, String> {
-    let candidates = node_candidates();
-    for candidate in candidates {
+    if let Some(configured) = std::env::var_os("TAURI_CODEX_SYSTEM_NODE") {
+        let configured = PathBuf::from(configured);
+        return if command_succeeds(&configured, ["--version"]) {
+            Ok(configured)
+        } else {
+            Err("Launcher 指定的系统 Node.js 不可运行".to_string())
+        };
+    }
+    for candidate in system_node_candidates() {
         if command_succeeds(&candidate, ["--version"]) {
             return Ok(candidate);
         }
     }
     Err("未找到可运行的系统 Node.js；请先安装 Node.js LTS".to_string())
-}
-
-pub fn system_npm() -> Result<PathBuf, String> {
-    if cfg!(windows) {
-        let node = system_node()?;
-        let cli = npm_cli_for_node(&node).ok_or_else(|| {
-            format!(
-                "系统 Node.js 缺少 npm CLI：{}",
-                node.parent().unwrap_or_else(|| Path::new(".")).display()
-            )
-        })?;
-        let output = crate::job::background_command(&node)
-            .arg(&cli)
-            .arg("--version")
-            .output()
-            .map_err(|error| format!("无法运行系统 npm：{error}"))?;
-        if output.status.success() {
-            return Ok(cli);
-        }
-        return Err(format!(
-            "系统 npm 不可运行：{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    for candidate in command_candidates("npm") {
-        if command_succeeds(&candidate, ["--version"]) {
-            return Ok(candidate);
-        }
-    }
-    Err("未找到可运行的系统 npm；请先安装 Node.js LTS".to_string())
 }
 
 pub fn validate_node(node: &Path) -> Result<(), String> {
@@ -150,7 +126,7 @@ pub fn validate_node(node: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn node_candidates() -> Vec<PathBuf> {
+pub(crate) fn system_node_candidates() -> Vec<PathBuf> {
     let mut candidates = command_candidates(if cfg!(windows) { "node.exe" } else { "node" });
     if cfg!(windows) {
         for (root, suffix) in [
@@ -168,7 +144,7 @@ fn node_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
+pub(crate) fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
     let node_dir = node.parent()?;
     [
         node_dir.join("node_modules/npm/bin/npm-cli.js"),
@@ -176,6 +152,28 @@ fn npm_cli_for_node(node: &Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())
+}
+
+pub(crate) fn system_npm_for_node(node: &Path) -> Result<PathBuf, String> {
+    let cli = npm_cli_for_node(node).ok_or_else(|| {
+        format!(
+            "系统 Node.js 缺少 npm CLI：{}",
+            node.parent().unwrap_or_else(|| Path::new(".")).display()
+        )
+    })?;
+    let output = crate::job::background_command(node)
+        .arg(&cli)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("无法运行系统 npm：{error}"))?;
+    if output.status.success() {
+        Ok(cli)
+    } else {
+        Err(format!(
+            "系统 npm 不可运行：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 fn command_candidates(name: &str) -> Vec<PathBuf> {

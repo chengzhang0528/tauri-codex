@@ -14,6 +14,7 @@ const installerVersions = JSON.parse(readFileSync(path.join(appRoot, "installer-
 const appPackage = JSON.parse(readFileSync(path.join(appRoot, "package.json"), "utf8"));
 const appVersion = appPackage.version;
 const installerVersion = installerVersions.installerVersion;
+const minimumManagerVersion = installerVersions.minimumManagerVersion;
 const buildRoot = path.join(workspaceRoot, ".codex-build");
 const releaseRoot = path.join(buildRoot, "releases", appVersion, "windows-x64");
 const componentRoot = path.join(releaseRoot, "components");
@@ -205,7 +206,7 @@ function prepareComponents(signing) {
   verifyManagerArchive(managerArchive);
   const payload = {
     product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
-    minimumLauncherVersion: installerVersion, minimumManagerVersion: appVersion,
+    minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,
     components: [
       { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: "authenticode+ed25519", artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), "authenticode+ed25519") },
       { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: "authenticode+ed25519", artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), "authenticode+ed25519") },
@@ -217,10 +218,40 @@ function prepareComponents(signing) {
   return { managerArchive, codexArchive, nodeAsset, payload, envelope, manifest: objectArtifact(manifestOutput, releaseKey("manifest.json"), "ed25519") };
 }
 
-function shouldBuildInstaller() { return process.env.TAURI_BUILD_INSTALLER === "1" || !installerVersions.publishedArtifact; }
+let probedInstaller;
+
+function downloadOptionalInstaller(key, destination) {
+  const result = spawnSync("curl.exe", ["--silent", "--show-error", "--output", destination, "--write-out", "%{http_code}", `${OSS_ROOT}/${key}`], { cwd: workspaceRoot, encoding: "utf8", windowsHide: true });
+  if (result.error) fail(`curl.exe unavailable: ${result.error.message}`);
+  const status = result.stdout.trim();
+  if (status === "404") return false;
+  if (result.status !== 0) fail(`OSS Installer 探测失败（HTTP ${status || "unknown"}）：${result.stderr.trim()}`);
+  if (status !== "200") fail(`OSS Installer 探测返回意外 HTTP ${status || "unknown"}。`);
+  return true;
+}
+
+function probePublishedInstaller() {
+  if (probedInstaller !== undefined) return probedInstaller;
+  const key = installerKey(`tauri-codex_${installerVersion}_x64-setup.exe`);
+  const downloaded = path.join(releaseRoot, `.probe-installer-${installerVersion}.exe`);
+  try {
+    if (!downloadOptionalInstaller(key, downloaded)) {
+      probedInstaller = null;
+      return probedInstaller;
+    }
+    const measured = artifactRecord(downloaded);
+    verifyAuthenticode(downloaded);
+    probedInstaller = { objectKey: key, size: measured.size, sha256: measured.sha256, provenance: "authenticode+ed25519" };
+  } finally {
+    rmSync(downloaded, { force: true });
+  }
+  return probedInstaller;
+}
+
+function shouldBuildInstaller() { return process.env.TAURI_BUILD_INSTALLER === "1" || (!installerVersions.publishedArtifact && !probePublishedInstaller()); }
 
 function publishedInstaller() {
-  const artifact = installerVersions.publishedArtifact;
+  const artifact = installerVersions.publishedArtifact ?? probePublishedInstaller();
   if (!artifact || artifact.objectKey !== installerKey(`tauri-codex_${installerVersion}_x64-setup.exe`) || !Number.isSafeInteger(artifact.size) || artifact.size <= 0 || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.provenance !== "authenticode+ed25519") fail("installer-versions.json 缺少可复用 OSS Installer identity。");
   const downloaded = path.join(releaseRoot, `.reused-installer-${installerVersion}.exe`);
   try {
@@ -302,6 +333,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   try {
     if (process.env.TAURI_RELEASE_VERSION && process.env.TAURI_RELEASE_VERSION !== appVersion) fail("TAURI_RELEASE_VERSION 与 app/package.json 不一致。");
     if (installerVersions.schemaVersion !== 2 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(installerVersion)) fail("installer-versions.json 无效。");
+    if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(minimumManagerVersion)) fail("installer-versions.json 缺少有效 minimumManagerVersion。");
     switch (mode) {
       case "bootstrap": bootstrap(); break;
       case "build": build(); break;

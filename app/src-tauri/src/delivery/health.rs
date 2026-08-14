@@ -6,27 +6,49 @@ use std::time::{Duration, Instant};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn doctor_manager(root: &Path) -> Result<(), String> {
+pub fn doctor_system_node(minimum: &str) -> Result<std::path::PathBuf, String> {
+    let mut failures = Vec::new();
+    for node in paths::system_node_candidates() {
+        if let Err(error) = verify_authenticode(&node) {
+            failures.push(error);
+            continue;
+        }
+        match crate::runtime::check_system_node_candidate_at_least(&node, minimum) {
+            Ok((node, _)) => return Ok(node),
+            Err(error) => failures.push(format!("{}：{error}", node.display())),
+        }
+    }
+    Err(if failures.is_empty() {
+        format!("未找到满足版本 {minimum} 且通过 Authenticode 的系统 Node.js/npm")
+    } else {
+        format!(
+            "没有合格的系统 Node.js/npm（要求 {minimum}）：{}",
+            failures.join("；")
+        )
+    })
+}
+
+pub fn doctor_manager(root: &Path, system_node: &Path) -> Result<(), String> {
     require_nonempty(&root.join("tauri-codex-manager.exe"), "Manager 入口")?;
     require_nonempty(
         &root.join("WebView2Loader.dll"),
         "Manager WebView2 运行时依赖",
     )?;
-    verify_authenticode(&root.join("tauri-codex-manager.exe"))?;
-    run_success(
-        job::background_command(root.join("tauri-codex-manager.exe")).arg("--runtime-check"),
-        DOCTOR_TIMEOUT,
-        "Manager doctor",
-    )
+    verify_authenticode_tree(root)?;
+    let mut command = job::background_command(root.join("tauri-codex-manager.exe"));
+    command
+        .arg("--runtime-check")
+        .env("TAURI_CODEX_SYSTEM_NODE", system_node);
+    run_success(&mut command, DOCTOR_TIMEOUT, "Manager doctor")
 }
 
-pub fn doctor_codex(root: &Path) -> Result<(), String> {
+pub fn doctor_codex(root: &Path, system_node: &Path) -> Result<(), String> {
     let entry = codex_entry(root)?;
     verify_authenticode_tree(root)?;
     let smoke_home = root.join(format!(".doctor-home-{}", uuid::Uuid::new_v4().simple()));
     fs::create_dir_all(&smoke_home).map_err(|error| error.to_string())?;
     let result = run_success(
-        job::background_command(paths::system_node()?)
+        job::background_command(system_node)
             .arg(entry)
             .arg("--version")
             .env("CODEX_HOME", &smoke_home)

@@ -4,6 +4,7 @@ mod component;
 mod contract;
 mod health;
 mod ipc;
+mod takeover;
 mod transaction;
 
 pub use broker::{
