@@ -30,7 +30,7 @@ Depends On:
 |---|---|---|
 | `bootstrap` | 检查 Rust GNU/MSYS2，安装锁定依赖并准备固定 Codex/Node 构建输入 | 写入依赖目录与 `.codex-build/cache/` |
 | `build` | 编译未发布的 Windows x64 Launcher 和 Manager | 写入 `.codex-build/build/` 与 Tauri target |
-| `installer:build` | 从一个冻结 source/version 构建并签名 Launcher、Manager、Codex/Node components、manifest、Bootstrap 和需要时的 NSIS | 写入 `.codex-build/releases/<version>/windows-x64/` |
+| `installer:build` | 从一个冻结 source/version 构建并签名 Launcher、Manager、Codex/Node components，对最终归档运行 Manager/Codex doctor，再生成 manifest、Bootstrap 和需要时的 NSIS | 写入 `.codex-build/releases/<version>/windows-x64/` |
 | `installer:verify` | 验证候选 identity、signed envelope、object key、size/SHA-256、组件闭包、Manager ZIP、Authenticode 要求和冻结元数据 | 只读 |
 | `build:release` | 依次执行 bootstrap、候选构建与候选验证 | 只生成本地候选，不上传、不安装 |
 | `verify:release` | 对已有冻结候选重复验证，不重建同版本 | 只读 |
@@ -57,8 +57,8 @@ GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHEN
 ## 候选事务
 
 1. 固定 source commit、Manager version、Installer version、Codex version、Node version、key ID 和 object keys。
-2. 清理当前版本输出后只构建一次。签名 Launcher/Manager/Installer 与需验证的 Windows 组件，生成 Manager/Codex/Node immutable payload。
-3. 生成并 Ed25519 签名 manifest，再生成并签名 Bootstrap；写入 `candidate.json` 固定所有 bytes、size、SHA-256、key ID 和路径。
+2. 清理当前版本输出后只构建一次。签名 Launcher/Manager 与需验证的 Windows 组件并生成最终 Manager/Codex/Node 归档；解开最终归档，实际执行 Manager `--runtime-check` 和 Codex `--version`。
+3. 最终 doctor 通过后才计算组件 identity 并生成 Ed25519 signed manifest；随后按需构建并签名 Installer，生成最终 signed Bootstrap，再写入 `candidate.json` 固定所有 bytes、size、SHA-256、key ID 和路径。
 4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
 5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
 6. 完整匿名回读 closure 后，`commit` 最后写 `bootstrap/windows-x64.json` 并再次匿名读取同 bytes。
@@ -71,6 +71,7 @@ GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHEN
 - Vite 必须产出 `index.html` 与 `launcher.html`。
 - Cargo 必须显式产出 `tauri-codex.exe` Launcher 和 `tauri-codex-manager.exe` Manager。
 - Manager ZIP 必须包含非空 `tauri-codex-manager.exe` 与同目录 `WebView2Loader.dll`。
+- 最终 Manager/Codex 归档必须在 manifest 和 `candidate.json` 冻结前通过 Manager `--runtime-check` 与 Codex `--version`；依赖准备阶段的缓存命中不代替该检查。
 - NSIS 必须嵌入 signed Bootstrap seed、许可证与 Installer-owned 资源，不携带 Manager/Codex/Node payload。
 - 稳定 Installer 复用时从 OSS immutable object 读取并验证，禁止从 GitHub 下载或依赖本地旧文件。
 - 首次公开新构建图前必须至少完成一次仅保留依赖缓存的 clean-output build。

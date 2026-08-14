@@ -58,7 +58,7 @@ type Snapshot = {
   terminals: TerminalInstance[];
   delivery: DeliverySnapshot;
 };
-type UpdateStateName = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "verifying" | "staged" | "waiting_for_drain" | "activating" | "health_check" | "ready" | "reboot_required" | "failed" | "repair_required";
+type UpdateStateName = "idle" | "checking" | "up_to_date" | "available" | "setup_required" | "downloading" | "verifying" | "staged" | "waiting_for_drain" | "activating" | "health_check" | "ready" | "reboot_required" | "failed" | "repair_required";
 type UpdateTarget = { release: { version: string } } | { installer: { version: string } };
 type DeliverySnapshot = {
   state: UpdateStateName;
@@ -1183,8 +1183,8 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateViewState): vo
   const updateBadge = document.querySelector<HTMLElement>("#nav-update-status");
   const delivery = updateState.delivery;
   if (updateBadge) {
-    const pending = ["available", "downloading", "verifying", "staged", "waiting_for_drain", "reboot_required", "repair_required"].includes(delivery.state);
-    updateBadge.textContent = pending ? "可用" : "";
+    const pending = ["available", "setup_required", "downloading", "verifying", "staged", "waiting_for_drain", "reboot_required", "repair_required"].includes(delivery.state);
+    updateBadge.textContent = delivery.state === "setup_required" ? "需安装" : pending ? "可用" : "";
     updateBadge.hidden = !pending;
   }
   if (!summary || !primary || !cancel || !progress || !progressBar) return;
@@ -1212,6 +1212,7 @@ function updateSummary(delivery: DeliverySnapshot, activeSessions: number): stri
     case "checking": return "正在检查";
     case "up_to_date": return "已是最新版本";
     case "available": return `${targetLabel(delivery.target)} 可用`;
+    case "setup_required": return `${targetLabel(delivery.target)} 需要新版 Setup；若升级失败，请卸载后重装，设置和 CODEX_HOME 会保留`;
     case "downloading": return delivery.component ? `正在下载 ${delivery.component}` : "正在下载";
     case "verifying": return delivery.component ? `正在验证 ${delivery.component}` : "正在验证";
     case "staged": return activeSessions > 0 ? `已准备，等待 ${activeSessions} 个会话结束` : `${targetLabel(delivery.target)} 已准备`;
@@ -1229,6 +1230,7 @@ function updateSummary(delivery: DeliverySnapshot, activeSessions: number): stri
 function updateAction(delivery: DeliverySnapshot, activeSessions: number): { label: string; icon: "download" | "refresh-cw" | "rotate-ccw"; disabled: boolean } {
   switch (delivery.state) {
     case "available": return { label: "准备更新", icon: "download", disabled: false };
+    case "setup_required": return { label: "请运行新版 Setup", icon: "refresh-cw", disabled: true };
     case "repair_required": return { label: "重新准备", icon: "rotate-ccw", disabled: false };
     case "reboot_required": return { label: "继续准备", icon: "rotate-ccw", disabled: false };
     case "staged":

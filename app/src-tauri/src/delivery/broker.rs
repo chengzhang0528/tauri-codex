@@ -158,17 +158,15 @@ impl Broker {
             Ok((target, identity)) => {
                 next.target = target.clone();
                 next.target_identity = identity;
-                next.state = if target.is_some() {
-                    UpdateState::Available
-                } else {
-                    UpdateState::UpToDate
+                (next.state, next.phase) = match target {
+                    Some(UpdateTarget::Installer { .. }) => {
+                        (UpdateState::SetupRequired, "setup-required".to_string())
+                    }
+                    Some(UpdateTarget::Release { .. }) => {
+                        (UpdateState::Available, "available".to_string())
+                    }
+                    None => (UpdateState::UpToDate, "up-to-date".to_string()),
                 };
-                next.phase = if target.is_some() {
-                    "available"
-                } else {
-                    "up-to-date"
-                }
-                .to_string();
                 next.checked_at = Some(now());
                 next.error = None;
             }
@@ -189,6 +187,7 @@ impl Broker {
             if !matches!(
                 inner.transaction.state,
                 UpdateState::Available
+                    | UpdateState::SetupRequired
                     | UpdateState::Failed
                     | UpdateState::RebootRequired
                     | UpdateState::RepairRequired
@@ -204,6 +203,11 @@ impl Broker {
                 .target
                 .clone()
                 .ok_or_else(|| "没有可准备的兼容更新".to_string())?;
+            if let UpdateTarget::Installer { version } = &target {
+                return Err(format!(
+                    "Installer {version} 不能在应用内准备，请运行新版 Setup；若升级失败，请卸载后重装"
+                ));
+            }
             let target_identity = inner.transaction.target_identity.clone();
             let mut next = transaction::begin(
                 inner.transaction.trigger.clone(),
@@ -444,28 +448,9 @@ impl Broker {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<component::StageReleaseOutcome, String> {
         match target {
-            UpdateTarget::Installer { version } => {
-                let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
-                contract::validate_bootstrap(&bootstrap)?;
-                verify_target_bootstrap(target_identity, &bootstrap_sha256)?;
-                let installer = bootstrap
-                    .payload
-                    .installer
-                    .as_ref()
-                    .ok_or_else(|| "Bootstrap seed 不包含 Installer 更新".to_string())?;
-                if &installer.version != version {
-                    return Err("Installer 目标与 Bootstrap 不一致".to_string());
-                }
-                verify_target_artifact(target_identity, &installer.artifact.sha256)?;
-                component::stage_installer(
-                    &self.root,
-                    version,
-                    &installer.artifact,
-                    progress,
-                    cancelled,
-                )?;
-                Ok(component::StageReleaseOutcome::Staged)
-            }
+            UpdateTarget::Installer { version } => Err(format!(
+                "Installer {version} 不能在应用内准备，请运行新版 Setup"
+            )),
             UpdateTarget::Release { version } => {
                 let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
                 verify_target_bootstrap(target_identity, &bootstrap_sha256)?;
@@ -491,19 +476,9 @@ impl Broker {
         contract::validate_bootstrap(&bootstrap)?;
         verify_target_bootstrap(target_identity, &bootstrap_sha256)?;
         match target {
-            UpdateTarget::Installer { version } => {
-                let installer = bootstrap
-                    .payload
-                    .installer
-                    .as_ref()
-                    .ok_or_else(|| "Bootstrap 缺少 Installer 激活目标".to_string())?;
-                if &installer.version != version {
-                    return Err("激活前 Installer 目标已变化".to_string());
-                }
-                verify_target_artifact(target_identity, &installer.artifact.sha256)?;
-                component::verify_staged_installer(&self.root, version, &installer.artifact)?;
-                Ok(())
-            }
+            UpdateTarget::Installer { version } => Err(format!(
+                "Installer {version} 不能在应用内激活，请运行新版 Setup"
+            )),
             UpdateTarget::Release { version } => {
                 let manifest = read_manifest(&bootstrap)?;
                 if &manifest.payload.version != version {
@@ -627,29 +602,9 @@ pub fn run_manager_broker(root: PathBuf, _instance: ipc::InstanceGuard) -> Resul
             broker.revalidate_target(&target, target_identity.as_ref())?;
             match target {
                 UpdateTarget::Installer { version } => {
-                    let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
-                    contract::validate_bootstrap(&bootstrap)?;
-                    verify_target_bootstrap(target_identity.as_ref(), &bootstrap_sha256)?;
-                    let installer_ref = bootstrap
-                        .payload
-                        .installer
-                        .as_ref()
-                        .filter(|installer| installer.version == version)
-                        .ok_or_else(|| "Bootstrap Installer 与激活目标不一致".to_string())?;
-                    verify_target_artifact(
-                        target_identity.as_ref(),
-                        &installer_ref.artifact.sha256,
-                    )?;
-                    let installer = component::verify_staged_installer(
-                        &root,
-                        &version,
-                        &installer_ref.artifact,
-                    )?;
-                    job::background_command(installer)
-                        .arg("/S")
-                        .spawn()
-                        .map_err(|error| error.to_string())?;
-                    return Ok(());
+                    return Err(format!(
+                        "Installer {version} 不能由运行中的 Manager 激活，请运行新版 Setup"
+                    ));
                 }
                 UpdateTarget::Release { .. } => match activation::commit_staged(&root, &target)
                     .and_then(|_| {
@@ -697,7 +652,7 @@ fn automatic_cycle(broker: &Arc<Broker>) {
         matches!(
             snapshot.state,
             UpdateState::Available | UpdateState::Failed | UpdateState::RepairRequired
-        ) && snapshot.target.is_some()
+        ) && matches!(snapshot.target, Some(UpdateTarget::Release { .. }))
     }) {
         let _ = broker.handle(UpdateIntent::Prepare);
     }
@@ -745,8 +700,11 @@ fn activation_health(root: &Path) -> Result<(), String> {
     health::doctor_codex(&release.join("codex"), &system_node)
 }
 
-pub fn current_release_healthy(root: &Path) -> bool {
+pub fn current_release_ready_for_launcher(root: &Path) -> bool {
     activation::recover_pending(root)
+        .and_then(|_| {
+            ensure_manager_version_supported(activation::current_release_version(root)?.as_deref())
+        })
         .and_then(|_| activation_health(root))
         .is_ok()
 }
@@ -859,7 +817,8 @@ fn initial_setup(app: &AppHandle) -> Result<(), String> {
         Some(UpdateTarget::Release { version }) => version,
         None => bootstrap.payload.release.version.clone(),
     };
-    if current.as_deref() == Some(version.as_str()) && current_release_healthy(&root) {
+    ensure_manager_version_supported(Some(&version))?;
+    if current.as_deref() == Some(version.as_str()) && current_release_ready_for_launcher(&root) {
         transaction::record_ready(
             &root,
             UpdateTarget::Release {
@@ -1050,6 +1009,29 @@ fn include_installer_version() -> Result<String, String> {
     Ok(version.to_string())
 }
 
+fn include_minimum_manager_version() -> Result<String, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(include_str!("../../../installer-versions.json"))
+            .map_err(|error| format!("installer-versions.json 无效：{error}"))?;
+    let version = value
+        .get("minimumManagerVersion")
+        .and_then(|version| version.as_str())
+        .ok_or_else(|| "installer-versions.json 缺少 minimumManagerVersion".to_string())?;
+    contract::validate_version(version)?;
+    Ok(version.to_string())
+}
+
+fn ensure_manager_version_supported(current: Option<&str>) -> Result<(), String> {
+    let current = current.ok_or_else(|| "尚无可运行的 current release".to_string())?;
+    let minimum = include_minimum_manager_version()?;
+    if contract::newer(&minimum, current)? {
+        return Err(format!(
+            "当前 Manager {current} 低于 Launcher 要求 {minimum}，必须先完成 Launcher setup"
+        ));
+    }
+    Ok(())
+}
+
 fn select_target(
     bootstrap: &Bootstrap,
     current_release: Option<&str>,
@@ -1113,7 +1095,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::select_target;
+    use super::{ensure_manager_version_supported, select_target};
     use crate::delivery::contract::{
         Artifact, Bootstrap, BootstrapPayload, InstallerRef, ReleaseRef, UpdateTarget,
     };
@@ -1175,5 +1157,11 @@ mod tests {
         );
         let older = bootstrap("1.1.0", "0.1.9", "1.1.0");
         assert!(select_target(&older, Some("0.2.0"), "1.1.0").is_err());
+    }
+
+    #[test]
+    fn compiled_launcher_minimum_rejects_an_older_manager() {
+        assert!(ensure_manager_version_supported(Some("0.1.9")).is_err());
+        assert!(ensure_manager_version_supported(Some("0.2.0")).is_ok());
     }
 }

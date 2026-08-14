@@ -12,7 +12,7 @@ Prefer the current repository stack and its official packaging/update path. Comp
 | Desktop web UI with existing Electron/Tauri/Wails/native shell | Existing framework packager and updater | Supported OS/architecture output, signing, hidden helper execution, restart/activation behavior, and post-activation recovery evidence |
 | Native desktop client | Existing OS-native installer/toolchain | Real OS integration, prerequisites, service/helper, repair/uninstall, or offline requirements |
 | Store-managed client | Platform store | Store rules, signing, staged rollout, update ownership, and recovery limitations |
-| Large multi-component client | Stable thin launcher plus manifest components | Proven need for independent payload reuse, first-run network behavior, compatibility bridge, and recovery |
+| Large multi-component client | Stable thin launcher plus manifest components | Proven need for independent payload reuse, first-run network behavior, explicit compatibility handling, and recovery |
 
 Do not introduce another runtime, UI shell, installer framework, updater service, or release stream for familiarity alone. Record build size, installed size, prerequisites, signing support, cross-platform cost, update ownership, process behavior, and long-term maintenance for a material choice.
 
@@ -65,7 +65,7 @@ Prefer a non-mutating official metadata/API check, then update the exact version
 
 Do not add a custom release-asset downloader when the official package manager, store, framework updater, or launcher already owns update discovery and installation. If first install came from an installer but runtime components are officially package-managed, record that split explicitly and keep one owner per component.
 
-Keep application, installer/launcher, and managed capability versions separate when they release independently. Each has one canonical version owner and compatibility relation; a normal capability update must not rewrite the installer or application version unless their owned behavior or compatibility bridge changes.
+Keep application, installer/launcher, and managed capability versions separate when they release independently. Each has one canonical version owner and compatibility relation; a normal capability update must not rewrite the installer or application version unless their owned behavior or compatibility contract changes.
 
 ## Design The User Interaction
 

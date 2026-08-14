@@ -140,40 +140,6 @@ fn verify_release(manifest: &Manifest, release: &Path, state: &str) -> Result<()
     Ok(())
 }
 
-pub fn verify_staged_installer(
-    root: &Path,
-    version: &str,
-    artifact: &Artifact,
-) -> Result<PathBuf, String> {
-    let dir = root.join("installer-updates").join(version);
-    if !dir.join(".ready").is_file() {
-        return Err(format!("Installer {version} 尚未完成 stage"));
-    }
-    let target = dir.join(format!("tauri-codex_{version}_x64-setup.exe"));
-    verify_cached_artifact(&target, artifact)?;
-    health::verify_authenticode(&target)?;
-    Ok(target)
-}
-
-pub fn stage_installer(
-    root: &Path,
-    version: &str,
-    artifact: &Artifact,
-    progress: &mut dyn FnMut(&str, &str, u64, u64),
-    cancelled: &dyn Fn() -> bool,
-) -> Result<PathBuf, String> {
-    ensure_not_cancelled(cancelled)?;
-    let dir = root.join("installer-updates").join(version);
-    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let target = dir.join(format!("tauri-codex_{version}_x64-setup.exe"));
-    download(artifact, &target, "Installer", progress, cancelled)?;
-    progress("正在验证组件", "Installer", 0, 0);
-    ensure_not_cancelled(cancelled)?;
-    health::verify_authenticode(&target)?;
-    fs::write(dir.join(".ready"), b"ready\n").map_err(|error| error.to_string())?;
-    Ok(target)
-}
-
 fn required<'a>(manifest: &'a Manifest, id: ComponentId) -> Result<&'a Component, String> {
     manifest
         .payload

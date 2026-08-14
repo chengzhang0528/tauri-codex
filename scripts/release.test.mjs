@@ -73,6 +73,10 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.match(pipeline, /status === "404"/);
   assert.match(pipeline, /minimumManagerVersion:\s*minimumManagerVersion/);
   assert.doesNotMatch(pipeline, /minimumManagerVersion:\s*appVersion/);
+  assert.match(pipeline, /doctorFinalComponentArchives\(managerArchive, codexArchive\)/);
+  assert.ok(pipeline.indexOf("doctorFinalComponentArchives(managerArchive, codexArchive);") < pipeline.indexOf("const payload = {"));
+  assert.match(pipeline, /tauri-codex-manager\.exe"\), \["--runtime-check"\]/);
+  assert.match(pipeline, /codexEntry, "--version"/);
   assert.doesNotMatch(pipeline, /probePublishedInstaller\(\)[\s\S]{0,800}catch\s*\{/);
   assert.match(managerMain, /compile_error!/);
 });
@@ -86,11 +90,14 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
   assert.match(health, /verify_authenticode_tree\(root\)/);
   assert.match(broker, /automatic_cycle\(&automatic\)/);
   assert.match(broker, /UpdateIntent::Prepare/);
+  assert.match(broker, /UpdateState::SetupRequired/);
+  assert.doesNotMatch(broker, /stage_installer|verify_staged_installer/);
+  assert.doesNotMatch(broker, /background_command\(installer\)/);
   assert.match(broker, /job::background_command\(&manager\)/);
   assert.match(ipc, /PIPE_REJECT_REMOTE_CLIENTS/);
   assert.match(ipc, /D:P\(A;;GA;;;/);
   assert.match(ipc, /acquire_instance/);
-  assert.ok(launcher.indexOf("acquire_launcher_instance") < launcher.indexOf("current_release_healthy"));
+  assert.ok(launcher.indexOf("acquire_launcher_instance") < launcher.indexOf("current_release_ready_for_launcher"));
   assert.match(broker, /_instance: ipc::InstanceGuard/);
   assert.doesNotMatch(broker, /startup_bridge|read_bootstrap_remote_for_startup|manager_bridge_required/);
 });

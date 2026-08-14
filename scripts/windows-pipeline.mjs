@@ -198,6 +198,40 @@ function verifyArchiveTree(filePath, expectedDigest) {
   }
 }
 
+function doctorFinalComponentArchives(managerArchive, codexArchive) {
+  const root = path.join(buildRoot, `candidate-doctor-${randomUUID()}`);
+  const managerRoot = path.join(root, "manager");
+  const codexRoot = path.join(root, "codex");
+  const doctorHome = path.join(root, "codex-home");
+  mkdirSync(managerRoot, { recursive: true });
+  mkdirSync(codexRoot, { recursive: true });
+  mkdirSync(doctorHome, { recursive: true });
+  try {
+    run("tar.exe", ["-xf", managerArchive, "-C", managerRoot]);
+    run("tar.exe", ["-xf", codexArchive, "-C", codexRoot]);
+    run(path.join(managerRoot, "tauri-codex-manager.exe"), ["--runtime-check"], {
+      env: { ...process.env, TAURI_CODEX_SYSTEM_NODE: process.execPath },
+      capture: true,
+    });
+    const codexEntry = [
+      path.join(codexRoot, "node_modules", "@openai", "codex", "bin", "codex.js"),
+      path.join(codexRoot, "node_modules", "@openai", "codex", "bin", "codex"),
+      path.join(codexRoot, "node_modules", "@openai", "codex", "dist", "cli.js"),
+    ].find((entry) => existsSync(entry));
+    if (!codexEntry) fail("最终 Codex component 缺少 CLI 入口。");
+    const output = run(process.execPath, [codexEntry, "--version"], {
+      cwd: codexRoot,
+      env: { ...process.env, CODEX_HOME: doctorHome },
+      capture: true,
+    }).stdout.trim();
+    if (!output.split(/\s+/).includes(versions.codexVersion)) {
+      fail(`最终 Codex component 版本不匹配：${output || "无输出"}`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function bootstrap() {
   const toolchain = toolchainEnvironment();
   const dependencies = path.join(appRoot, "node_modules");
@@ -237,6 +271,7 @@ function prepareComponents(signing) {
   const codexTreeSha256 = installedTreeSha256(codexRoot);
   verifyArchiveTree(managerArchive, managerTreeSha256);
   verifyArchiveTree(codexArchive, codexTreeSha256);
+  doctorFinalComponentArchives(managerArchive, codexArchive);
   const payload = {
     product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
     minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,

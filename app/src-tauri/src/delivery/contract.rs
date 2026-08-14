@@ -117,6 +117,7 @@ pub enum UpdateState {
     Checking,
     UpToDate,
     Available,
+    SetupRequired,
     Downloading,
     Verifying,
     Staged,
@@ -631,6 +632,14 @@ mod tests {
         .unwrap();
         assert_eq!(release, json!({"release": {"version": "0.2.1"}}));
         assert_eq!(installer, json!({"installer": {"version": "1.1.1"}}));
+    }
+
+    #[test]
+    fn setup_required_has_a_stable_wire_name() {
+        assert_eq!(
+            serde_json::to_value(super::UpdateState::SetupRequired).unwrap(),
+            json!("setup_required")
+        );
     }
 
     #[test]

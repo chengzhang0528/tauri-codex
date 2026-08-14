@@ -86,9 +86,11 @@ Do not resolve assets by filename guesses, latest directory entries, or a mutabl
 
 ## 4. Install And Startup
 1. The Installer lays down the launcher, icons, shortcuts, registration, and required license/bootstrap material. It should not need network access unless the platform contract explicitly requires a prerequisite bootstrapper.
-2. After install finalization, start one launcher setup flow. It must tolerate first install, same-version repair, and higher-version in-place upgrade without asking the user to uninstall when the platform supports takeover. Preserve one product registration, settings, and business state.
-3. The launcher reads the minimum bootstrap contract. If its own version is lower, it downloads and verifies the referenced newer installer, runs it, exits, and lets the new launcher restart setup. If it is newer than the pointer, it must not downgrade automatically.
-4. After an Installer/Launcher upgrade, the new Launcher must inspect the bundled release contract before starting an already installed older Manager. If that Manager cannot understand the new source or manifest contract, the Launcher prepares the compatible release itself and starts the Manager only after the bridge is complete.
+2. After install finalization, start one launcher setup flow. Preserve one product registration, settings, and business state. Use same-version repair or higher-version in-place upgrade when the selected platform path supports it and the product compatibility contract permits it.
+3. Resolve the Installer/Launcher compatibility rule before designing self-update behavior:
+   - When the ProductContract promises in-place compatibility, or reinstall cannot preserve required user-owned state, ensure a compatible Launcher and Manager before starting an older client. Implement and test only the bridge or migration needed to uphold that promise.
+   - When compatibility is not promised and user-owned state survives Setup/reinstall, do not download, stage, execute, or activate an incompatible Installer from the running client. Report `setup-required`, direct the user to the newer official Setup, offer uninstall/reinstall only as a fallback, and leave the current installation and user data untouched.
+4. An externally run newer Setup may install the new Launcher. Before that Launcher starts an existing Manager, compare the Manager with the Launcher's compiled minimum version; when incompatible, enter the normal setup/bootstrap flow and prepare a compatible release. This is a startup admission check, not a historical compatibility bridge.
 5. The launcher reads the selected release manifest, probes components, and reuses eligible system or private-cache candidates. A successful probe must be observable as reused/skipped and must not copy, upgrade, edit, or change global PATH for a system component.
 6. Missing or insufficient components are fetched from the configured distribution endpoint. A required component that cannot be verified or doctored must prevent `ready`.
 
@@ -122,11 +124,13 @@ Failure removes only temporary or failed staging data. It must not alter `curren
 ## 7. Client State And Activation
 Use the smallest state machine that changes ownership, user action, or recovery:
 
-`current -> checking -> up-to-date | available -> updating/downloading -> verifying -> staged -> waiting-for-drain -> restart-required/activating -> health-check -> ready`
+`current -> checking -> up-to-date | setup-required`
+
+`current -> checking -> available -> updating/downloading -> verifying -> staged -> waiting-for-drain -> restart-required/activating -> health-check -> ready`
 
 Failure may occur from any state. Use one fixed Manager primary control: it sends a read-only `check` while idle/current and changes to the applicable explicit update intent only after a compatible version is available or staged. Disable it while loading, checking, or updating, and prevent a periodic response from unlocking a foreground request early.
 
-Check automatically at Launcher startup and about every six hours while the Manager runs. Download, verify, and stage automatically in the background, but create no Service or scheduled task after the client exits. Activation remains separately user-confirmed, and a pending update must remain visible rather than being mistaken for an activated version.
+Check automatically at Launcher startup and about every six hours while the Manager runs. Download, verify, and stage compatible application components automatically in the background, but never prepare an Installer target that requires external Setup. Create no Service or scheduled task after the client exits. Activation remains separately user-confirmed, and a pending update must remain visible rather than being mistaken for an activated version.
 
 Before activation, revalidate the selected manifest, component digests, launcher compatibility, and active-work count. The Manager stops accepting new work and waits for the documented drain condition. Never force-close active sessions as a routine update mechanism.
 
@@ -141,8 +145,8 @@ Installer and Launcher must not read or migrate product registrations, workspace
 - Installer objects are immutable and published once. A same-version retry must read back and prove identical size/digest; it must never overwrite.
 - The bootstrap update is last. Before changing it, verify every referenced installer, manifest, component, digest, schema, and doctor result through the public read path.
 - Keep OSS publisher admission, immutable upload/read-back, and Bootstrap commit as distinct workflow jobs or modes with explicit dependencies. Do not put the credential check after publication.
-- If a new manifest schema or launcher contract is not understood by the current launcher, publish a compatible launcher/installer first and select it only after its asset closure is complete.
-- Keep only the compatibility needed for already published launchers: usually the minimal installer fields in bootstrap. Do not promise migration of arbitrary historical private state without an explicit decision.
+- If a new manifest schema or launcher contract is not understood by the current launcher, follow the resolved compatibility rule: either publish the explicitly promised bridge or make the running client stop at `setup-required` until the user runs the newer official Setup.
+- Keep only compatibility required by an explicit product promise or state-preservation need. Do not infer historical protocol, schema, rollback, or private-state migration from the existence of already published launchers.
 
 ### Build-graph gates
 Treat a split Launcher/Manager application as a multi-entry build, not just a source-code split:
@@ -163,7 +167,7 @@ Use an exact public asset, not a worktree binary:
 1. Verify public OSS object metadata, size, SHA-256, platform, architecture, and signing/provenance.
 2. Install on a clean supported machine or isolated profile; confirm launcher starts and creates the expected shortcut/registration.
 3. Confirm the launcher can bootstrap a release using the deployment-configured public endpoint.
-4. Repeat the same Installer and then run a higher Installer; confirm one registration, preserved user data, and no uninstall requirement.
+4. Exercise the contract-selected Installer evolution path. For promised in-place compatibility, repeat the same Installer and then run a higher Installer without losing registration or user data. Otherwise prove the running client stops at `setup-required`, external Setup or fallback reinstall preserves user-owned state, and no incompatible partial mutation occurs.
 5. Test both eligible and missing system-component cases; assert reuse versus download.
 6. Corrupt a staged asset or doctor result; assert `current` remains runnable and no bad release becomes ready.
 7. Stage an update while work is active; assert waiting-for-drain and no forced interruption.

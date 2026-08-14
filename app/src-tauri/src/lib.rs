@@ -145,7 +145,7 @@ pub fn run_launcher() {
     let Some(instance) = instance else {
         return;
     };
-    if delivery::current_release_healthy(&root) {
+    if delivery::current_release_ready_for_launcher(&root) {
         if let Err(error) = delivery::run_manager_broker(root, instance) {
             eprintln!("Launcher Broker failed: {error}");
         }
@@ -175,7 +175,7 @@ pub fn run_launcher() {
         .run(tauri::generate_context!())
         .expect("error while running tauri-codex launcher");
     if let Ok(root) = paths::delivery_root() {
-        if delivery::current_release_healthy(&root) {
+        if delivery::current_release_ready_for_launcher(&root) {
             let _ = delivery::run_manager_broker(root, instance);
         }
     }

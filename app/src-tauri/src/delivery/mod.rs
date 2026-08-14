@@ -8,7 +8,7 @@ mod takeover;
 mod transaction;
 
 pub use broker::{
-    current_release_healthy, run_launcher_action, start_launcher_setup, LauncherState,
+    current_release_ready_for_launcher, run_launcher_action, start_launcher_setup, LauncherState,
 };
 pub use contract::{CheckTrigger, DeliverySnapshot, UpdateIntent, UpdateResult, UpdateState};
 pub(crate) use ipc::InstanceGuard;
