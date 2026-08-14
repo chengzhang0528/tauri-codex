@@ -5,7 +5,7 @@ Kind: Decision
 Decision ID: DEC-0001
 Scope: tauri-codex / 首个交付技术方向
 Owner: 项目维护者
-Updated: 2026-08-13
+Updated: 2026-08-14
 Depends On:
 - ../产品契约.md
 
@@ -35,7 +35,7 @@ Depends On:
 | 输出压力 | Session Host 和对应嵌入 xterm 之间使用有界队列与逐批渲染确认；过载只影响对应会话 | Tauri Rust runtime 与 xterm | 防止终端输出洪泛 |
 | 模型实例 | 每个 Responses API 实例保存名称、URL、API Key 和唯一默认标记，并生成不含 model 的独立 `<profile>.config.toml` | 配置层与 Codex | 用户决定与 Codex 0.134+ 配置规则 |
 | 配置隔离 | 所有 Codex 进程显式使用同一个应用专属 `CODEX_HOME` | Tauri Rust runtime | 用户决定与官方能力 |
-| 更新 | GitHub Releases 提供公开版本页和不可变资产，固定项目 OSS 保存同字节发布闭包作为备用读取源；Launcher 负责探测、下载、校验、staging、激活与 previous 保留 | Launcher/Updater | 用户决定与 Here 交付边界 |
+| 更新 | 固定项目 OSS 是唯一 binary origin；Launcher/Broker 独占 signed manifest、下载、校验、事务、staging、激活与 forward-repair | Launcher/Updater | 用户决定与客户端交付边界 |
 
 ## 运行结构
 
@@ -56,16 +56,18 @@ flowchart LR
   X2 --> Deck
   P1 --> Home["应用专属 CODEX_HOME"]
   P2 --> Home
-  Desktop --> Releases["GitHub Releases / Codex staging"]
+  Desktop -. "Named Pipe 更新意图" .-> Launcher
+  Launcher --> Releases["OSS signed release closure"]
 ```
 
 ## 职责边界
 
 ### NSIS Setup 与 Launcher
 
-- NSIS 只安装稳定 Launcher、图标、Bootstrap 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只接受项目 GitHub Release 与固定 `shared-public-assets/project-tauri-codex` OSS 根，任一来源都必须通过同一大小和 SHA-256。
-- Launcher 读取固定 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定源下载，校验大小/SHA-256、解包并 doctor 通过后才进入 staging。
+- NSIS 只安装稳定 Launcher、图标、signed Bootstrap seed 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只从固定 `shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/` OSS 根读取精确 object key。
+- Launcher 读取 Ed25519 signed Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定 OSS object key 下载，校验 size/SHA-256/签名、解包并 doctor 通过后才进入 staging。
 - 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理；准备完成后启动 Tauri Manager。
+- Launcher 在 Manager 存活期间保持为隐藏 Broker，通过当前用户受限 Named Pipe 接受更新意图；Manager 不持有组件文件或安装行为。
 
 ### Tauri 主窗口与嵌入终端
 
@@ -91,13 +93,13 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 ## 更新状态
 
-更新状态为 `idle → checking → available → staging → verifying → waiting-instances → activating → ready`，失败为 `failed`。
+更新由一笔 Launcher 持久事务表达：`idle → checking → up-to-date | available → downloading → verifying → staged → waiting-for-drain → activating → health-check → ready`；普通失败为 `failed`，激活后失败为 `repair-required`。
 
-- 应用启动后及运行期间默认周期检查更新；自动检查发现新版本后由 Launcher 下载、验证并暂存完整 release 或独立 Installer。
-- 用户点击对应更新动作后才激活 Installer、Manager/Codex release；该动作不自动结束活动 TUI。
-- 任何正在启动或运行的 Session Host 都会阻止 Codex 和桌面更新激活。
-- 所有 TUI 归零后，控制进程重新验证 Codex staging 和 Node 条件，再切换 Codex `current`；提交前失败不改变旧版本。
-- Launcher/Installer 更新通过已下载的新版 NSIS Setup 完成；普通 Manager/Codex release 更新由 Launcher 原子切换，不由运行中的控制窗口覆盖自身文件。Codex 的独立更新入口继续遵循用户明确点击和无活动会话才激活的边界。
+- Manager 只有一个动态主按钮。手动 `check` 是只读操作；`available` 后同一按钮提交 `prepare`；`staged` 后且活动会话为零时提交 `activate`。
+- Launcher 启动后及运行期间约每六小时自动检查，并可自动准备完整 release 或独立 Installer；自动路径不激活、不退出 Manager、不结束活动 TUI。
+- Manager、Codex 与 Node fallback 由同一个 manifest 共同 stage，不存在 Codex 独立 `current`、npm view/install 或单独版本切换。
+- Launcher/Installer 更新运行已完成 Authenticode 验证的新版 NSIS Setup；普通 release 更新由 Launcher 原子切换。激活后健康失败只 forward-repair 当前目标，不自动回滚。
+- schema v2 是破坏性切换，不提供 schema v1 或旧 Launcher 桥接；旧安装必须重新运行新版 Installer。
 
 ## 实施准入
 
@@ -114,6 +116,7 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 - 不提供应用自建的持久历史 session 树、应用自有聊天 UI、同页多会话分屏（终端甲板只显示当前选中的 xterm）、聊天转录缓存、自动任务重放或应用级并发上限；左侧目录只是当前运行实例的内存投影。
 - 不使用 app-server、`codex exec --json` 或 Responses API 事件自行重建 Codex 交互。
 - 不支持系统全局 Codex、产品账号系统、macOS、Linux 或 Windows ARM64。
+- 不提供 GitHub binary fallback、旧 Bootstrap compatibility、独立 Codex 更新或自动 rollback。
 - 不保证整机资源耗尽时其他任务仍实时响应。
 
 ## 证据
@@ -126,6 +129,6 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 ## 发布与官方文档获取边界
 
-- 桌面发布在任何公开 Release 出现前先验证 `oss-release` 环境、凭据名称、项目 OSS 写入和匿名回读；冻结候选后先将同一不可变闭包上传并完整回读到项目 OSS 前缀，再公开 GitHub Release，复核两个公开源后最后提交 OSS Bootstrap。前置失败不得公开 Release，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
+- 桌面发布先验证 `oss-release` 环境、凭据名称、项目 OSS 写入和匿名回读；冻结并完成 Authenticode/Ed25519 签名后，将同一不可变闭包上传并完整匿名回读到项目 OSS 前缀，最后提交 OSS Bootstrap。GitHub tag/Release Notes 只能在 OSS closure 可读后创建，下载链接指向 OSS 且不得上传二进制。前置失败不得公开版本，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
 - 官方 Codex 文档查询使用工作区 skill [official-codex-docs](../../../../.agents/skills/official-codex-docs/SKILL.md)，保留 `developers.openai.com` 官方 URL；Windows helper 依次使用显式 `CODEX_DOCS_PROXY`、`localhost:1080`、`127.0.0.1:1080`，最后直连 HTTPS。
 - 该代理只用于开发资料抓取，不注入应用、Codex、更新器或用户会话。

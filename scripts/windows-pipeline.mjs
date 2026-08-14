@@ -1,415 +1,316 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptRoot, "..");
 const appRoot = path.join(workspaceRoot, "app");
 const appScript = path.join(appRoot, "scripts", "run-tauri-windows.mjs");
-const config = JSON.parse(readFileSync(path.join(appRoot, "build-versions.json"), "utf8"));
-const installerConfig = JSON.parse(readFileSync(path.join(appRoot, "installer-versions.json"), "utf8"));
+const versions = JSON.parse(readFileSync(path.join(appRoot, "build-versions.json"), "utf8"));
+const installerVersions = JSON.parse(readFileSync(path.join(appRoot, "installer-versions.json"), "utf8"));
 const appPackage = JSON.parse(readFileSync(path.join(appRoot, "package.json"), "utf8"));
-const tauriConfig = JSON.parse(readFileSync(path.join(appRoot, "src-tauri", "tauri.conf.json"), "utf8"));
 const appVersion = appPackage.version;
-const installerVersion = installerConfig.installerVersion;
-const installerReleaseTag = installerConfig.releaseTag;
+const installerVersion = installerVersions.installerVersion;
 const buildRoot = path.join(workspaceRoot, ".codex-build");
 const releaseRoot = path.join(buildRoot, "releases", appVersion, "windows-x64");
-const targetReleaseRoot = path.join(appRoot, "src-tauri", "target", config.rustTarget, "release");
-const installerSource = path.join(targetReleaseRoot, "bundle", "nsis", `tauri-codex_${installerVersion}_x64-setup.exe`);
-const installerOutput = path.join(releaseRoot, `tauri-codex_${installerVersion}_x64-setup.exe`);
-const installerManifest = path.join(releaseRoot, "installer.json");
 const componentRoot = path.join(releaseRoot, "components");
-const releaseManifest = path.join(releaseRoot, "manifest.json");
+const releaseCargoRoot = path.join(buildRoot, "cargo-release");
+const targetRoot = path.join(releaseCargoRoot, versions.rustTarget, "release");
+const launcherSource = path.join(targetRoot, "tauri-codex.exe");
+const managerSource = path.join(targetRoot, "tauri-codex-manager.exe");
+const webviewLoaderSource = path.join(targetRoot, "WebView2Loader.dll");
+const installerSource = path.join(targetRoot, "bundle", "nsis", `tauri-codex_${installerVersion}_x64-setup.exe`);
+const installerOutput = path.join(releaseRoot, path.basename(installerSource));
+const manifestOutput = path.join(releaseRoot, "manifest.json");
+const bootstrapOutput = path.join(releaseRoot, "bootstrap.json");
 const bootstrapResource = path.join(appRoot, "src-tauri", "resources", "bootstrap.json");
-const managerSource = path.join(targetReleaseRoot, "tauri-codex-manager.exe");
-const managerWebViewLoaderSource = path.join(targetReleaseRoot, "WebView2Loader.dll");
-const managerArchiveFiles = [path.basename(managerSource), path.basename(managerWebViewLoaderSource)];
-const releaseAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/v${appVersion}/${name}`;
-const installerAssetUrl = (name) => `https://github.com/chengzhang0528/tauri-codex/releases/download/${installerReleaseTag}/${name}`;
-const releaseObjectKey = (name) => `releases/${appVersion}/windows-x64/${name}`;
-const componentObjectKey = (name) => `releases/${appVersion}/windows-x64/components/${name}`;
-const installerObjectKey = (name) => `installers/${installerVersion}/windows-x64/${name}`;
+const candidateOutput = path.join(releaseRoot, "candidate.json");
+const OSS_ROOT = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
+const MANAGER_FILES = ["tauri-codex-manager.exe", "WebView2Loader.dll"];
 
-if (process.env.TAURI_RELEASE_VERSION && process.env.TAURI_RELEASE_VERSION !== appVersion) {
-  fail(`TAURI_RELEASE_VERSION ${process.env.TAURI_RELEASE_VERSION} 与 app/package.json ${appVersion} 不一致。`);
-}
-if (installerConfig.schemaVersion !== 1 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(installerVersion) ||
-    !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(installerReleaseTag)) {
-  fail("installer-versions.json 无效。");
+export function canonicalJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
-function fail(message) {
-  throw new Error(message);
+export function signEnvelope(payload, { keyId, privateKey }) {
+  const signature = sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64");
+  return { schemaVersion: 2, keyId, payload, signature };
 }
+
+export function verifyEnvelope(envelope, { keyId, publicKey }) {
+  if (envelope?.schemaVersion !== 2 || envelope.keyId !== keyId) throw new Error("signed envelope identity 不匹配");
+  if (!verify(null, Buffer.from(canonicalJson(envelope.payload)), publicKey, Buffer.from(envelope.signature, "base64"))) throw new Error("Ed25519 signature 校验失败");
+  return envelope.payload;
+}
+
+function fail(message) { throw new Error(message); }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: options.cwd ?? workspaceRoot,
-    env: options.env ?? process.env,
-    stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    encoding: "utf8",
-    windowsHide: false,
-  });
-  if (result.error) throw new Error(`${command} unavailable: ${result.error.message}`);
-  if (result.status !== 0) throw new Error(`${path.basename(command)} exited with ${result.status}`);
+  const result = spawnSync(command, args, { cwd: options.cwd ?? workspaceRoot, env: options.env ?? process.env, stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit", encoding: "utf8", windowsHide: true });
+  if (result.error) fail(`${command} unavailable: ${result.error.message}`);
+  if (result.status !== 0) fail(`${path.basename(command)} exited with ${result.status}${options.capture && result.stderr ? `: ${result.stderr.trim()}` : ""}`);
   return result;
 }
 
-function npmCommand() {
-  const node = process.env.npm_node_execpath ?? process.execPath;
-  const cli = process.env.npm_execpath;
-  if (!cli) fail("必须通过 npm run 调用根脚本，以便定位 npm CLI。");
-  return { node, cli };
+function gitOutput(args) {
+  return run("git", ["-C", workspaceRoot, ...args], { capture: true }).stdout.trim();
 }
 
-function runNpm(args, env) {
-  const { node, cli } = npmCommand();
-  return run(node, [cli, ...args], { env });
+function frozenSource() {
+  if (gitOutput(["status", "--porcelain"])) fail("生产候选必须从 clean Git worktree 构建。");
+  const commit = gitOutput(["rev-parse", "HEAD"]);
+  if (!/^[a-f0-9]{40}$/.test(commit)) fail("无法固定 source commit。");
+  return commit;
 }
+
+function npmCommand() {
+  const cli = process.env.npm_execpath;
+  if (!cli) fail("必须通过 npm run 调用根脚本，以便定位 npm CLI。");
+  return { node: process.env.npm_node_execpath ?? process.execPath, cli };
+}
+
+function runNpm(args, env) { const { node, cli } = npmCommand(); return run(node, [cli, ...args], { env }); }
 
 function toolchainEnvironment() {
   if (process.platform !== "win32") fail("Windows 构建脚本只能在 Windows 上运行。");
-  const userProfile = process.env.USERPROFILE;
-  const localAppData = process.env.LOCALAPPDATA;
-  const cargoBin = userProfile ? path.join(userProfile, ".cargo", "bin") : "";
+  const cargoBin = process.env.USERPROFILE ? path.join(process.env.USERPROFILE, ".cargo", "bin") : "";
   const rustup = cargoBin ? path.join(cargoBin, "rustup.exe") : "";
-  const mingwCandidates = [
-    process.env.TAURI_MINGW_BIN,
-    localAppData && path.join(localAppData, "Programs", "msys64", "ucrt64", "bin"),
-    "C:\\msys64\\ucrt64\\bin",
-    "C:\\Program Files\\msys64\\ucrt64\\bin",
-  ].filter(Boolean);
-  const mingwBin = mingwCandidates.find((candidate) =>
-    existsSync(path.join(candidate, "windres.exe")) &&
-    existsSync(path.join(candidate, "gcc.exe")) &&
-    existsSync(path.join(candidate, "ar.exe")),
-  );
-  if (!rustup || !existsSync(rustup)) fail(`未找到 Rustup: ${rustup || "USERPROFILE 未设置"}`);
-  if (!mingwBin) fail("未找到 MSYS2 UCRT64 工具链（需要 windres.exe、gcc.exe 和 ar.exe）。");
-
+  const candidates = [process.env.TAURI_MINGW_BIN, process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "msys64", "ucrt64", "bin"), "C:\\msys64\\ucrt64\\bin", "C:\\Program Files\\msys64\\ucrt64\\bin"].filter(Boolean);
+  const mingwBin = candidates.find((candidate) => ["windres.exe", "gcc.exe", "ar.exe"].every((name) => existsSync(path.join(candidate, name))));
+  if (!existsSync(rustup)) fail("未找到 Rustup。");
+  if (!mingwBin) fail("未找到 MSYS2 UCRT64 工具链。");
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-  const cacheRoot = path.join(buildRoot, "cache");
-  const npmCache = path.join(cacheRoot, "npm");
-  mkdirSync(cacheRoot, { recursive: true });
-  const env = {
-    ...process.env,
-    RUSTUP_TOOLCHAIN: config.rustToolchain,
-    TAURI_BUILD_CACHE: cacheRoot,
-    npm_config_cache: npmCache,
-    npm_config_prefer_offline: "true",
-    [pathKey]: [mingwBin, cargoBin, process.env[pathKey]].filter(Boolean).join(";"),
-  };
-  const compiler = run(rustup, ["run", config.rustToolchain, "rustc", "-Vv"], { env, capture: true });
-  const installedTargets = run(rustup, ["target", "list", "--installed", "--toolchain", config.rustToolchain], { env, capture: true });
-  if (!installedTargets.stdout.split(/\r?\n/).includes(config.rustTarget)) {
-    fail(`Rust target ${config.rustTarget} 未安装。`);
+  const env = { ...process.env, RUSTUP_TOOLCHAIN: versions.rustToolchain, npm_config_cache: path.join(buildRoot, "cache", "npm"), npm_config_prefer_offline: "true", [pathKey]: [mingwBin, cargoBin, process.env[pathKey]].filter(Boolean).join(";") };
+  mkdirSync(path.join(buildRoot, "cache"), { recursive: true });
+  const installed = run(rustup, ["target", "list", "--installed", "--toolchain", versions.rustToolchain], { env, capture: true }).stdout.split(/\r?\n/);
+  if (!installed.includes(versions.rustTarget)) fail(`Rust target ${versions.rustTarget} 未安装。`);
+  return { env, rustup };
+}
+
+function releaseSigning() {
+  const keyId = process.env.TAURI_CODEX_RELEASE_KEY_ID?.trim();
+  const privateBytes = process.env.TAURI_CODEX_RELEASE_PRIVATE_KEY?.trim();
+  const publicBytes = process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY?.trim();
+  if (!keyId || !privateBytes || !publicBytes) fail("生产候选缺少 TAURI_CODEX_RELEASE_KEY_ID/PRIVATE_KEY/PUBLIC_KEY。");
+  let privateKey;
+  try { privateKey = createPrivateKey({ key: Buffer.from(privateBytes, "base64"), format: "der", type: "pkcs8" }); } catch (error) { fail(`Ed25519 private key 无效：${error.message}`); }
+  const derived = createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32);
+  if (!derived.equals(Buffer.from(publicBytes, "base64"))) fail("Ed25519 public key 与 private key 不匹配。");
+  const publicKey = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), derived]), format: "der", type: "spki" });
+  return { keyId, privateKey, publicKey, publicRaw: publicBytes };
+}
+
+function publicSigning() {
+  const keyId = process.env.TAURI_CODEX_RELEASE_KEY_ID?.trim();
+  const bytes = Buffer.from(process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY?.trim() ?? "", "base64");
+  if (!keyId || bytes.length !== 32) fail("候选验证缺少可信 Ed25519 key ID/public key。");
+  return { keyId, publicKey: createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), bytes]), format: "der", type: "spki" }) };
+}
+
+function findSignTool() {
+  if (process.env.TAURI_CODEX_SIGNTOOL && existsSync(process.env.TAURI_CODEX_SIGNTOOL)) return process.env.TAURI_CODEX_SIGNTOOL;
+  const result = spawnSync("where.exe", ["signtool.exe"], { encoding: "utf8", windowsHide: true });
+  const found = result.status === 0 ? result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) : undefined;
+  if (!found) fail("未找到 signtool.exe。");
+  return found;
+}
+
+function signAuthenticode(filePath) {
+  const thumbprint = process.env.TAURI_CODEX_AUTHENTICODE_THUMBPRINT?.trim();
+  const timestamp = process.env.TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL?.trim();
+  if (!thumbprint || !timestamp) fail("生产候选缺少 Authenticode thumbprint 或 timestamp URL。");
+  const signtool = findSignTool();
+  run(signtool, ["sign", "/sha1", thumbprint, "/fd", "SHA256", "/tr", timestamp, "/td", "SHA256", filePath]);
+  verifyAuthenticode(filePath);
+}
+
+function verifyAuthenticode(filePath) { run(findSignTool(), ["verify", "/pa", "/all", filePath]); }
+function ensureAuthenticode(filePath) {
+  const verified = spawnSync(findSignTool(), ["verify", "/pa", "/all", filePath], { stdio: "ignore", windowsHide: true });
+  if (verified.status !== 0) signAuthenticode(filePath);
+}
+function filesBelow(root) {
+  const files = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const resolved = path.join(root, entry.name);
+    if (entry.isDirectory()) files.push(...filesBelow(resolved));
+    else if (entry.isFile()) files.push(resolved);
+    else fail(`候选资源不允许链接或特殊文件：${resolved}`);
   }
-  return { env, rustup, mingwBin, compiler: compiler.stdout.trim() };
+  return files;
+}
+function sha256(filePath) { return createHash("sha256").update(readFileSync(filePath)).digest("hex"); }
+function artifactRecord(filePath) { return { path: path.relative(workspaceRoot, filePath).replaceAll(path.sep, "/"), size: statSync(filePath).size, sha256: sha256(filePath) }; }
+function objectArtifact(filePath, objectKey, provenance) { const measured = artifactRecord(filePath); return { objectKey, size: measured.size, sha256: measured.sha256, provenance }; }
+function componentKey(name) { return `releases/${appVersion}/windows-x64/components/${name}`; }
+function releaseKey(name) { return `releases/${appVersion}/windows-x64/${name}`; }
+function installerKey(name) { return `installers/${installerVersion}/windows-x64/${name}`; }
+function writeJson(filePath, value) { mkdirSync(path.dirname(filePath), { recursive: true }); writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8"); }
+
+function createArchive(output, cwd, entries) {
+  const result = spawnSync("tar.exe", ["-a", "-c", "-f", output, "-C", cwd, ...entries], { stdio: "inherit", windowsHide: true });
+  if (result.error || result.status !== 0) fail(`无法创建归档 ${output}`);
 }
 
-function readPreparedVersion(relativePath) {
-  const value = readFileSync(path.join(appRoot, relativePath), "utf8").trim();
-  return value;
+function archiveEntries(filePath) {
+  const result = run("tar.exe", ["-tf", filePath], { capture: true });
+  return result.stdout.split(/\r?\n/).map((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, "")).filter(Boolean).sort();
 }
 
-function sha256(filePath) {
-  return createHash("sha256").update(readFileSync(filePath)).digest("hex");
-}
-
-function artifactRecord(filePath) {
-  const stat = statSync(filePath);
-  return {
-    path: path.relative(workspaceRoot, filePath).replaceAll(path.sep, "/"),
-    size: stat.size,
-    sha256: sha256(filePath),
-  };
-}
-
-function publicArtifact(filePath, objectKey) {
-  const artifact = artifactRecord(filePath);
-  return { url: releaseAssetUrl(path.basename(filePath)), objectKey, size: artifact.size, sha256: artifact.sha256 };
-}
-
-function runQuiet(command, args, options = {}) {
-  return spawnSync(command, args, {
-    cwd: options.cwd ?? workspaceRoot,
-    env: options.env ?? process.env,
-    stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
-    encoding: "utf8",
-    windowsHide: true,
-  });
-}
-
-function listArchiveEntries(archivePath) {
-  const result = runQuiet("tar.exe", ["-tf", archivePath], { capture: true });
-  if (result.error || result.status !== 0) {
-    fail(`无法读取组件归档 ${archivePath}：${result.error?.message ?? result.stderr ?? result.status}`);
-  }
-  return result.stdout
-    .split(/\r?\n/)
-    .map((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, ""))
-    .filter(Boolean)
-    .sort();
-}
-
-function verifyManagerArchive(archivePath) {
-  const entries = listArchiveEntries(archivePath);
-  const expected = [...managerArchiveFiles].sort();
-  if (JSON.stringify(entries) !== JSON.stringify(expected)) {
-    fail(`Manager 组件归档内容不完整：期望 ${expected.join(", ")}，实际 ${entries.join(", ")}`);
-  }
-}
-
-function prepareComponentAssets() {
-  const codexRoot = path.join(appRoot, "src-tauri", "resources", "codex");
-  const nodeRoot = path.join(appRoot, "src-tauri", "resources", "node");
-  const codexPackage = path.join(codexRoot, "node_modules", "@openai", "codex", "package.json");
-  const nodeMsi = path.join(nodeRoot, `node-v${config.nodeVersion}-x64.msi`);
-  if (!existsSync(codexPackage) || !existsSync(nodeMsi)) fail("薄安装器组件输入资源不完整，请先运行 npm run bootstrap");
-  mkdirSync(componentRoot, { recursive: true });
-  const codexArchive = path.join(componentRoot, `tauri-codex-codex-${config.codexVersion}-windows-x64.zip`);
-  const result = runQuiet("tar.exe", ["-a", "-c", "-f", codexArchive, "-C", codexRoot, "."]);
-  if (result.error || result.status !== 0) fail(`无法创建 Codex 组件归档：${result.error?.message ?? result.status}`);
-  const nodeAsset = path.join(componentRoot, `node-v${config.nodeVersion}-x64.msi`);
-  copyFileSync(nodeMsi, nodeAsset);
-  if (!existsSync(managerSource)) fail(`Manager 构建产物不存在：${managerSource}`);
-  if (!existsSync(managerWebViewLoaderSource) || statSync(managerWebViewLoaderSource).size === 0) {
-    fail(`Manager WebView2 运行时依赖不存在：${managerWebViewLoaderSource}`);
-  }
-  const managerArchive = path.join(componentRoot, `tauri-codex-manager-${appVersion}-windows-x64.zip`);
-  const managerResult = runQuiet("tar.exe", ["-a", "-c", "-f", managerArchive, "-C", path.dirname(managerSource), ...managerArchiveFiles]);
-  if (managerResult.error || managerResult.status !== 0) fail(`无法创建 Manager 组件归档：${managerResult.error?.message ?? managerResult.status}`);
-  verifyManagerArchive(managerArchive);
-  const manifest = {
-    schemaVersion: 1,
-    product: "tauri-codex",
-    version: appVersion,
-    platform: "windows",
-    architecture: "x86_64",
-    components: [
-      { id: "manager", version: appVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(managerArchive, componentObjectKey(path.basename(managerArchive))) },
-      { id: "codex", version: config.codexVersion, kind: "archive", required: true, archive: "zip", artifact: publicArtifact(codexArchive, componentObjectKey(path.basename(codexArchive))) },
-      { id: "node", version: config.nodeVersion, kind: "system-msi", required: true, archive: "msi", artifact: publicArtifact(nodeAsset, componentObjectKey(path.basename(nodeAsset))) },
-    ],
-  };
-  writeFileSync(releaseManifest, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  const manifestArtifact = publicArtifact(releaseManifest, releaseObjectKey("manifest.json"));
-  return { managerArchive, codexArchive, nodeAsset, manifest: releaseManifest, manifestArtifact };
-}
-
-function writeBootstrap(manifestArtifact, installerArtifact) {
-  const bootstrap = {
-    schemaVersion: 1,
-    product: "tauri-codex",
-    platform: "windows",
-    architecture: "x86_64",
-    installer: {
-      version: installerVersion,
-      artifact: {
-        url: installerAssetUrl(path.basename(installerOutput)),
-        objectKey: installerObjectKey(path.basename(installerOutput)),
-        size: installerArtifact.size,
-        sha256: installerArtifact.sha256,
-      },
-    },
-    release: { version: appVersion, manifest: manifestArtifact },
-  };
-  writeFileSync(bootstrapResource, `${JSON.stringify(bootstrap, null, 2)}\n`, "utf8");
-  copyFileSync(bootstrapResource, path.join(releaseRoot, "bootstrap.json"));
-}
-
-function writeManifest(filePath, artifact) {
-  mkdirSync(path.dirname(filePath), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify({
-    schemaVersion: 1,
-    appVersion,
-    installerVersion,
-    target: config.rustTarget,
-    codexVersion: config.codexVersion,
-    nodeVersion: config.nodeVersion,
-    nodeSha256: config.nodeSha256,
-    artifact,
-  }, null, 2)}\n`, "utf8");
-}
-
-function runTauri(mode, extraArgs, env) {
-  return run(process.execPath, [appScript, mode, ...extraArgs], { env });
-}
-
-function buildManager(toolchain) {
-  run(toolchain.rustup, [
-    "run", config.rustToolchain, "cargo", "build",
-    "--manifest-path", path.join(appRoot, "src-tauri", "Cargo.toml"),
-    "--release", "--target", config.rustTarget,
-    "--bin", "tauri-codex-manager",
-    "--features", "custom-protocol",
-  ], { env: toolchain.env });
-  if (!existsSync(managerSource)) fail(`Manager 构建产物不存在：${managerSource}`);
-}
-
-function shouldBuildInstaller() {
-  return process.env.TAURI_BUILD_INSTALLER === "1" || installerReleaseTag === `v${appVersion}`;
-}
-
-function readPublishedInstaller() {
-  const name = `tauri-codex_${installerVersion}_x64-setup.exe`;
-  const result = runQuiet("curl.exe", [
-    "--fail", "--silent", "--show-error",
-    "--header", "User-Agent: tauri-codex-release-builder",
-    `https://api.github.com/repos/chengzhang0528/tauri-codex/releases/tags/${installerReleaseTag}`,
-  ], { capture: true });
-  if (result.error || result.status !== 0) fail(`无法读取已发布稳定 Installer：${result.error?.message ?? result.stderr ?? result.status}`);
-  const release = JSON.parse(result.stdout);
-  const asset = release.assets?.find((candidate) => candidate.name === name);
-  const digest = asset?.digest?.replace(/^sha256:/, "").toLowerCase();
-  if (!asset || !Number.isSafeInteger(asset.size) || asset.size <= 0 || !/^[a-f0-9]{64}$/.test(digest ?? "")) {
-    fail(`GitHub Release ${installerReleaseTag} 缺少可验证的稳定 Installer ${name}`);
-  }
-  return { url: asset.browser_download_url, objectKey: installerObjectKey(name), size: asset.size, sha256: digest };
+function verifyManagerArchive(filePath) {
+  const actual = archiveEntries(filePath);
+  const expected = [...MANAGER_FILES].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`Manager archive 不完整：${actual.join(", ")}`);
 }
 
 function bootstrap() {
   const toolchain = toolchainEnvironment();
   const dependencies = path.join(appRoot, "node_modules");
-  const tauriBin = path.join(dependencies, ".bin", process.platform === "win32" ? "tauri.cmd" : "tauri");
-  const viteEntry = path.join(dependencies, "vite", "bin", "vite.js");
-  if (!existsSync(dependencies)) {
-    runNpm(["--prefix", appRoot, "ci", "--no-audit", "--no-fund"], toolchain.env);
-  } else if (!existsSync(tauriBin) || !existsSync(viteEntry)) {
-    console.log("app/node_modules 不完整，执行 npm install 修复缺失依赖，不删除现有目录。");
-    runNpm(["--prefix", appRoot, "install", "--no-audit", "--no-fund", "--no-package-lock"], toolchain.env);
-  } else {
-    console.log("复用已存在的 app/node_modules，跳过 npm ci 以避免打断正在运行的开发进程。");
-  }
+  if (!existsSync(dependencies)) runNpm(["--prefix", appRoot, "ci", "--no-audit", "--no-fund"], toolchain.env);
   runNpm(["--prefix", appRoot, "run", "prepare:codex"], toolchain.env);
   runNpm(["--prefix", appRoot, "run", "prepare:node"], toolchain.env);
-  console.log(JSON.stringify({ bootstrapped: true, target: config.rustTarget, codexVersion: config.codexVersion, nodeVersion: config.nodeVersion }, null, 2));
+  console.log(JSON.stringify({ bootstrapped: true, target: versions.rustTarget, codexVersion: versions.codexVersion, nodeVersion: versions.nodeVersion }, null, 2));
 }
 
-function build() {
-  const toolchain = toolchainEnvironment();
-  runTauri("build", ["--no-bundle"], toolchain.env);
-  buildManager(toolchain);
-  const binary = path.join(targetReleaseRoot, "tauri-codex.exe");
-  if (!existsSync(binary)) fail(`应用构建没有生成 ${binary}`);
-  const output = path.join(buildRoot, "build", appVersion, "windows-x64", "tauri-codex.exe");
-  mkdirSync(path.dirname(output), { recursive: true });
-  copyFileSync(binary, output);
-  console.log(JSON.stringify({ built: true, artifact: artifactRecord(output) }, null, 2));
+function buildBinaries(toolchain, signing) {
+  const env = { ...toolchain.env, CARGO_TARGET_DIR: releaseCargoRoot, TAURI_CODEX_RELEASE_KEY_ID: signing.keyId, TAURI_CODEX_RELEASE_PUBLIC_KEY: signing.publicRaw };
+  run(process.execPath, [appScript, "build", "--no-bundle"], { env });
+  run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "build", "--manifest-path", path.join(appRoot, "src-tauri", "Cargo.toml"), "--release", "--target", versions.rustTarget, "--bin", "tauri-codex-manager", "--features", "custom-protocol"], { env });
+  for (const binary of [launcherSource, managerSource]) { if (!existsSync(binary)) fail(`构建产物不存在：${binary}`); signAuthenticode(binary); }
+  if (!existsSync(webviewLoaderSource)) fail("Manager 缺少 WebView2Loader.dll。");
+  verifyAuthenticode(webviewLoaderSource);
+  return env;
+}
+
+function prepareComponents(signing) {
+  mkdirSync(componentRoot, { recursive: true });
+  const codexRoot = path.join(appRoot, "src-tauri", "resources", "codex");
+  const nodeMsi = path.join(appRoot, "src-tauri", "resources", "node", `node-v${versions.nodeVersion}-x64.msi`);
+  if (!existsSync(path.join(codexRoot, "node_modules", "@openai", "codex", "package.json")) || !existsSync(nodeMsi)) fail("Codex/Node 构建输入不完整，请先运行 bootstrap。");
+  const codexExecutables = filesBelow(codexRoot).filter((file) => path.extname(file).toLowerCase() === ".exe");
+  if (codexExecutables.length === 0) fail("Codex 构建输入不包含 Windows executable。");
+  for (const executable of codexExecutables) ensureAuthenticode(executable);
+  verifyAuthenticode(nodeMsi);
+  const managerArchive = path.join(componentRoot, `tauri-codex-manager-${appVersion}-windows-x64.zip`);
+  const codexArchive = path.join(componentRoot, `tauri-codex-codex-${versions.codexVersion}-windows-x64.zip`);
+  const nodeAsset = path.join(componentRoot, path.basename(nodeMsi));
+  createArchive(managerArchive, targetRoot, MANAGER_FILES);
+  createArchive(codexArchive, codexRoot, ["."]);
+  copyFileSync(nodeMsi, nodeAsset);
+  verifyManagerArchive(managerArchive);
+  const payload = {
+    product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
+    minimumLauncherVersion: installerVersion, minimumManagerVersion: appVersion,
+    components: [
+      { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: "authenticode+ed25519", artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), "authenticode+ed25519") },
+      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: "authenticode+ed25519", artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), "authenticode+ed25519") },
+      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: "authenticode+ed25519", artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), "authenticode+ed25519") },
+    ],
+  };
+  const envelope = signEnvelope(payload, signing);
+  writeJson(manifestOutput, envelope);
+  return { managerArchive, codexArchive, nodeAsset, payload, envelope, manifest: objectArtifact(manifestOutput, releaseKey("manifest.json"), "ed25519") };
+}
+
+function shouldBuildInstaller() { return process.env.TAURI_BUILD_INSTALLER === "1" || !installerVersions.publishedArtifact; }
+
+function publishedInstaller() {
+  const artifact = installerVersions.publishedArtifact;
+  if (!artifact || artifact.objectKey !== installerKey(`tauri-codex_${installerVersion}_x64-setup.exe`) || !Number.isSafeInteger(artifact.size) || artifact.size <= 0 || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.provenance !== "authenticode+ed25519") fail("installer-versions.json 缺少可复用 OSS Installer identity。");
+  const downloaded = path.join(releaseRoot, `.reused-installer-${installerVersion}.exe`);
+  try {
+    run("curl.exe", ["--fail", "--silent", "--show-error", "--output", downloaded, `${OSS_ROOT}/${artifact.objectKey}`]);
+    if (statSync(downloaded).size !== artifact.size || sha256(downloaded) !== artifact.sha256) fail("OSS Installer 匿名回读 identity 不匹配。");
+    verifyAuthenticode(downloaded);
+  } finally {
+    rmSync(downloaded, { force: true });
+  }
+  return artifact;
 }
 
 function buildReleaseCandidate() {
+  const signing = releaseSigning();
   const toolchain = toolchainEnvironment();
-  runTauri("build", ["--no-bundle"], toolchain.env);
-  buildManager(toolchain);
+  const sourceCommit = frozenSource();
   rmSync(releaseRoot, { recursive: true, force: true });
+  rmSync(releaseCargoRoot, { recursive: true, force: true });
   mkdirSync(releaseRoot, { recursive: true });
-  const components = prepareComponentAssets();
-  if (!shouldBuildInstaller()) {
-    const installer = readPublishedInstaller();
-    writeBootstrap(components.manifestArtifact, installer);
-    console.log(JSON.stringify({ built: true, installerReused: true, installer, components: [artifactRecord(components.managerArchive), artifactRecord(components.codexArchive), artifactRecord(components.nodeAsset), artifactRecord(components.manifest)] }, null, 2));
-    return;
-  }
-  const seedBootstrap = {
-    schemaVersion: 1,
-    product: "tauri-codex",
-    platform: "windows",
-    architecture: "x86_64",
-    release: { version: appVersion, manifest: components.manifestArtifact },
-  };
-  writeFileSync(bootstrapResource, `${JSON.stringify(seedBootstrap, null, 2)}\n`, "utf8");
-  runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", config.rustTarget, "--bundles", "nsis"], {
-    ...toolchain.env,
-  });
-  if (!existsSync(installerSource)) fail(`Tauri 没有生成 ${installerSource}`);
-  mkdirSync(releaseRoot, { recursive: true });
-  copyFileSync(installerSource, installerOutput);
-  const artifact = artifactRecord(installerOutput);
-  writeBootstrap(components.manifestArtifact, artifact);
-  writeManifest(installerManifest, artifact);
-  console.log(JSON.stringify({ built: true, installer: artifact, components: [artifactRecord(components.managerArchive), artifactRecord(components.codexArchive), artifactRecord(components.nodeAsset), artifactRecord(components.manifest)], manifest: path.relative(workspaceRoot, installerManifest).replaceAll(path.sep, "/") }, null, 2));
+  const buildEnv = buildBinaries(toolchain, signing);
+  const components = prepareComponents(signing);
+  const seedPayload = { product: "tauri-codex", platform: "windows", architecture: "x86_64", minimumLauncherVersion: installerVersion, installer: null, release: { version: appVersion, manifest: components.manifest } };
+  writeJson(bootstrapResource, signEnvelope(seedPayload, signing));
+  let installer;
+  let installerLocalPath = null;
+  if (shouldBuildInstaller()) {
+    runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv);
+    if (!existsSync(installerSource)) fail(`Tauri 未生成 ${installerSource}`);
+    for (const binary of [launcherSource, managerSource, webviewLoaderSource]) verifyAuthenticode(binary);
+    signAuthenticode(installerSource); copyFileSync(installerSource, installerOutput); installer = objectArtifact(installerOutput, installerKey(path.basename(installerOutput)), "authenticode+ed25519"); installerLocalPath = path.relative(releaseRoot, installerOutput).replaceAll(path.sep, "/");
+  } else installer = publishedInstaller();
+  const bootstrapPayload = { ...seedPayload, installer: { version: installerVersion, artifact: installer } };
+  writeJson(bootstrapOutput, signEnvelope(bootstrapPayload, signing));
+  const manifestComponents = components.payload.components;
+  const immutable = [
+    { role: "manifest", localPath: "manifest.json", artifact: components.manifest },
+    { role: "manager", localPath: path.relative(releaseRoot, components.managerArchive).replaceAll(path.sep, "/"), artifact: manifestComponents.find((component) => component.id === "manager").artifact },
+    { role: "codex", localPath: path.relative(releaseRoot, components.codexArchive).replaceAll(path.sep, "/"), artifact: manifestComponents.find((component) => component.id === "codex").artifact },
+    { role: "node", localPath: path.relative(releaseRoot, components.nodeAsset).replaceAll(path.sep, "/"), artifact: manifestComponents.find((component) => component.id === "node").artifact },
+    { role: "installer", localPath: installerLocalPath, artifact: installer },
+  ];
+  const candidate = { product: "tauri-codex", version: appVersion, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit, bootstrap: { localPath: "bootstrap.json", objectKey: "bootstrap/windows-x64.json", size: statSync(bootstrapOutput).size, sha256: sha256(bootstrapOutput), provenance: "ed25519" }, immutable };
+  writeJson(candidateOutput, signEnvelope(candidate, signing));
+  console.log(JSON.stringify({ built: true, version: appVersion, installerVersion, installerReused: !installerLocalPath, candidate: artifactRecord(candidateOutput) }, null, 2));
 }
 
 function verifyReleaseCandidate() {
-  const buildingInstaller = shouldBuildInstaller();
-  let artifact;
-  if (buildingInstaller) {
-    if (!existsSync(installerOutput)) fail(`找不到安装包 ${installerOutput}，先运行 npm run installer:build`);
-    if (!existsSync(installerManifest)) fail(`找不到安装包清单 ${installerManifest}`);
-    const installerRecord = JSON.parse(readFileSync(installerManifest, "utf8"));
-    artifact = artifactRecord(installerOutput);
-    if (installerRecord.schemaVersion !== 1 || installerRecord.appVersion !== appVersion || installerRecord.target !== config.rustTarget ||
-        installerRecord.codexVersion !== config.codexVersion || installerRecord.nodeVersion !== config.nodeVersion ||
-        installerRecord.installerVersion !== installerVersion || installerRecord.nodeSha256 !== config.nodeSha256) {
-      fail("安装包清单中的版本或目标与当前固定构建配置不一致。");
-    }
-    if (JSON.stringify(installerRecord.artifact) !== JSON.stringify(artifact)) fail("安装包清单与实际文件大小或 SHA-256 不一致。");
-    if (artifact.size < 1_000_000 || artifact.size > 30_000_000) fail("薄安装包体积异常，拒绝作为候选制品。");
+  if (!existsSync(candidateOutput)) fail("候选不存在，先运行 installer:build。");
+  const trust = publicSigning(); const candidateEnvelope = JSON.parse(readFileSync(candidateOutput, "utf8"));
+  const candidate = verifyEnvelope(candidateEnvelope, trust);
+  if (candidate.version !== appVersion || candidate.installerVersion !== installerVersion || candidate.sourceCommit !== gitOutput(["rev-parse", "HEAD"])) fail("candidate identity 与版本源不一致。");
+  const manifest = JSON.parse(readFileSync(manifestOutput, "utf8")); const bootstrapEnvelope = JSON.parse(readFileSync(bootstrapOutput, "utf8"));
+  const manifestPayload = verifyEnvelope(manifest, trust); const bootstrapPayload = verifyEnvelope(bootstrapEnvelope, trust);
+  if (manifestPayload.version !== appVersion || bootstrapPayload.release.version !== appVersion || bootstrapPayload.release.manifest.sha256 !== sha256(manifestOutput) || bootstrapPayload.installer.version !== installerVersion) fail("signed closure 版本或摘要不一致。");
+  for (const item of candidate.immutable) {
+    if (!item.localPath) continue;
+    const filePath = path.join(releaseRoot, item.localPath); if (!existsSync(filePath)) fail(`candidate localPath 缺失：${item.localPath}`);
+    if (statSync(filePath).size !== item.artifact.size || sha256(filePath) !== item.artifact.sha256) fail(`candidate bytes 已变化：${item.localPath}`);
   }
-  if (readPreparedVersion("src-tauri/resources/codex/.prepared-version") !== config.codexVersion ||
-      readPreparedVersion("src-tauri/resources/node/.prepared-version") !== config.nodeVersion) {
-    fail("内置 Codex 或 Node 资源版本与固定构建配置不一致。");
-  }
-  if (!existsSync(bootstrapResource) || !existsSync(releaseManifest)) fail("薄安装器 Bootstrap 或组件清单不存在。");
-  const bootstrap = JSON.parse(readFileSync(bootstrapResource, "utf8"));
-  const thinManifest = JSON.parse(readFileSync(releaseManifest, "utf8"));
-  artifact ??= bootstrap.installer?.artifact;
-  if (bootstrap.release?.version !== appVersion || bootstrap.installer?.version !== installerVersion ||
-      bootstrap.installer?.artifact?.size !== artifact.size || bootstrap.installer?.artifact?.sha256 !== artifact.sha256 ||
-      bootstrap.installer?.artifact?.objectKey !== installerObjectKey(path.basename(installerOutput)) ||
-      bootstrap.release?.manifest?.objectKey !== releaseObjectKey("manifest.json") ||
-      thinManifest.version !== appVersion || thinManifest.components?.length !== 3) {
-    fail("薄安装器 Bootstrap 或组件清单版本不一致。");
-  }
-  for (const component of thinManifest.components) {
-    const name = path.basename(new URL(component.artifact.url).pathname);
-    const local = path.join(componentRoot, name);
-    if (!existsSync(local)) fail(`组件资产缺失：${local}`);
-    const measured = artifactRecord(local);
-    if (measured.size !== component.artifact.size || measured.sha256 !== component.artifact.sha256 ||
-        component.artifact.objectKey !== componentObjectKey(name)) fail(`组件清单摘要或 OSS object key 不一致：${name}`);
-    if (component.id === "manager") verifyManagerArchive(local);
-  }
-  console.log(JSON.stringify({ verified: true, installer: artifact, installerReused: !buildingInstaller, thinInstaller: true, components: thinManifest.components.map((component) => component.id), codexVersion: config.codexVersion, nodeVersion: config.nodeVersion }, null, 2));
+  const manager = candidate.immutable.find((item) => item.role === "manager"); verifyManagerArchive(path.join(releaseRoot, manager.localPath));
+  for (const entry of [path.join(appRoot, "dist", "index.html"), path.join(appRoot, "dist", "launcher.html")]) if (!existsSync(entry)) fail(`Vite 构建入口缺失：${entry}`);
+  console.log(JSON.stringify({ verified: true, version: appVersion, installerVersion, schemaVersion: 2, source: OSS_ROOT }, null, 2));
 }
 
-function buildRelease() {
-  bootstrap();
-  buildReleaseCandidate();
-  verifyReleaseCandidate();
-}
-
-function verifyRelease() {
-  verifyReleaseCandidate();
-  console.log(JSON.stringify({ releaseVerified: true, version: appVersion, target: config.rustTarget }, null, 2));
+function build() {
+  const signing = releaseSigning(); const toolchain = toolchainEnvironment(); buildBinaries(toolchain, signing);
+  const output = path.join(buildRoot, "build", appVersion, "windows-x64", "tauri-codex.exe"); mkdirSync(path.dirname(output), { recursive: true }); copyFileSync(launcherSource, output); console.log(JSON.stringify({ built: true, artifact: artifactRecord(output) }, null, 2));
 }
 
 function rustTest() {
-  const toolchain = toolchainEnvironment();
-  const manifest = path.join(appRoot, "src-tauri", "Cargo.toml");
-  run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "fmt", "--manifest-path", manifest, "--", "--check"], { env: toolchain.env });
-  run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "check", "--manifest-path", manifest, "--tests"], { env: toolchain.env });
-  run(toolchain.rustup, ["run", config.rustToolchain, "cargo", "test", "--release", "--manifest-path", manifest, "--lib", "--target", config.rustTarget], { env: toolchain.env });
+  const toolchain = toolchainEnvironment(); const manifest = path.join(appRoot, "src-tauri", "Cargo.toml"); const env = { ...toolchain.env, CARGO_TARGET_DIR: path.join(buildRoot, "rust-test") };
+  run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "fmt", "--manifest-path", manifest, "--", "--check"], { env });
+  run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "check", "--manifest-path", manifest, "--tests"], { env });
+  run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "test", "--release", "--manifest-path", manifest, "--lib", "--target", versions.rustTarget], { env });
 }
 
-const mode = process.argv[2];
-try {
-  switch (mode) {
-    case "bootstrap": bootstrap(); break;
-    case "build": build(); break;
-    case "installer-build": buildReleaseCandidate(); break;
-    case "installer-verify": verifyReleaseCandidate(); break;
-    case "release-build": buildRelease(); break;
-    case "release-verify": verifyRelease(); break;
-    case "rust-test": rustTest(); break;
-    default: fail("用法: npm run <bootstrap|build|installer:build|installer:verify|build:release|verify:release>");
-  }
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  const mode = process.argv[2];
+  try {
+    if (process.env.TAURI_RELEASE_VERSION && process.env.TAURI_RELEASE_VERSION !== appVersion) fail("TAURI_RELEASE_VERSION 与 app/package.json 不一致。");
+    if (installerVersions.schemaVersion !== 2 || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(installerVersion)) fail("installer-versions.json 无效。");
+    switch (mode) {
+      case "bootstrap": bootstrap(); break;
+      case "build": build(); break;
+      case "installer-build": buildReleaseCandidate(); break;
+      case "installer-verify": verifyReleaseCandidate(); break;
+      case "release-build": bootstrap(); buildReleaseCandidate(); verifyReleaseCandidate(); break;
+      case "release-verify": verifyReleaseCandidate(); break;
+      case "rust-test": rustTest(); break;
+      default: fail("用法: npm run <bootstrap|build|installer:build|installer:verify|build:release|verify:release>");
+    }
+  } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
 }

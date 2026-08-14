@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
-  "installerVersion": "1.0.4",
-  "releaseTag": "v0.1.9"
+  "schemaVersion": 2,
+  "installerVersion": "1.1.0",
+  "publishedArtifact": null
 }

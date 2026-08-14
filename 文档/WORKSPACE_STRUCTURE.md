@@ -31,6 +31,7 @@ Depends On:
 - `工作空间/归档/` -> `Archive`
 - `项目/项目_tauri-codex/AGENTS.md` -> `AgentEntry`
 - `项目/项目_tauri-codex/产品契约.md` -> `ProductContract`
+- `项目/项目_tauri-codex/当前设计.md` -> `CurrentDesign`
 - `项目/项目_tauri-codex/决策/` -> `Decision`
 - `项目/项目_tauri-codex/运行/` -> `Runbook`
 - `项目/项目_tauri-codex/推进中/` -> `ChangePlan,SystemTestPlan,DeploymentPlan,Issue`

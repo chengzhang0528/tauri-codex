@@ -1,9 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tauri::{AppHandle, Manager};
-
-pub const GITHUB_REPOSITORY: &str = "chengzhang0528/tauri-codex";
 
 pub fn app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
     let root = app
@@ -20,12 +17,6 @@ pub fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn codex_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = app_data_root(app)?.join("codex");
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Ok(path)
-}
-
 pub fn server_profile_name(id: &str) -> String {
     format!("server-{}", safe_filename(id))
 }
@@ -36,24 +27,28 @@ pub fn server_env_key(id: &str) -> String {
 }
 
 pub fn current_codex_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let independently_managed = codex_root(app)?.join("current");
-    let managed = crate::thin::current_release_path(&app_data_root(app)?)?
-        .map(|release| release.join("codex"));
-    match (
-        codex_version_in(&independently_managed),
-        managed.as_deref().and_then(codex_version_in),
-    ) {
-        (Some(independent), Some(release)) if release > independent => {
-            Ok(managed.expect("managed release path exists when its version was read"))
-        }
-        (Some(_), _) => Ok(independently_managed),
-        (None, Some(_)) => {
-            Ok(managed.expect("managed release path exists when its version was read"))
-        }
-        (None, None) => Ok(independently_managed),
+    if let Some(release) = crate::delivery::current_release_path(&app_data_root(app)?)? {
+        return Ok(release.join("codex"));
     }
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?;
+    let resource = [
+        resource_root.join("codex"),
+        resource_root.join("resources/codex"),
+    ]
+    .into_iter()
+    .find(|candidate| {
+        candidate
+            .join("node_modules/@openai/codex/package.json")
+            .is_file()
+    })
+    .ok_or_else(|| "尚无 current release，且开发资源缺少应用私有 Codex".to_string())?;
+    Ok(resource)
 }
 
+#[cfg(test)]
 fn codex_version_in(root: &Path) -> Option<semver::Version> {
     let package = root.join("node_modules/@openai/codex/package.json");
     let value: serde_json::Value = serde_json::from_slice(&fs::read(package).ok()?).ok()?;
@@ -61,7 +56,6 @@ fn codex_version_in(root: &Path) -> Option<semver::Version> {
 }
 
 pub fn codex_entry(app: &AppHandle) -> Result<PathBuf, String> {
-    ensure_bundled_codex(app)?;
     let current = current_codex_dir(app)?;
     let candidates = [
         current.join("node_modules/@openai/codex/bin/codex.js"),
@@ -73,7 +67,7 @@ pub fn codex_entry(app: &AppHandle) -> Result<PathBuf, String> {
         .find(|candidate| candidate.is_file())
         .ok_or_else(|| {
             format!(
-                "应用私有 Codex 尚未安装，请在更新页安装 @openai/codex 到 {}",
+                "应用私有 Codex 不完整，请重新运行 tauri-codex Setup 修复：{}",
                 current.display()
             )
         })
@@ -91,22 +85,6 @@ pub fn codex_version(app: &AppHandle) -> Result<Option<String>, String> {
         .get("version")
         .and_then(|version| version.as_str())
         .map(str::to_owned))
-}
-
-pub fn pending_codex_versions(app: &AppHandle) -> Result<Vec<String>, String> {
-    let root = codex_root(app)?;
-    let mut versions = fs::read_dir(root)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            name.strip_prefix("staging-")
-                .filter(|version| !version.is_empty())
-                .map(str::to_string)
-        })
-        .collect::<Vec<_>>();
-    versions.sort();
-    Ok(versions)
 }
 
 pub fn system_node() -> Result<PathBuf, String> {
@@ -172,18 +150,6 @@ pub fn validate_node(node: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn npm_command() -> Result<Command, String> {
-    let npm = system_npm()?;
-    if cfg!(windows) {
-        let node = system_node()?;
-        let mut command = crate::job::background_command(node);
-        command.arg(npm);
-        Ok(command)
-    } else {
-        Ok(crate::job::background_command(npm))
-    }
-}
-
 fn node_candidates() -> Vec<PathBuf> {
     let mut candidates = command_candidates(if cfg!(windows) { "node.exe" } else { "node" });
     if cfg!(windows) {
@@ -240,52 +206,42 @@ where
         .unwrap_or(false)
 }
 
-pub(crate) fn ensure_bundled_codex(app: &AppHandle) -> Result<(), String> {
-    let current = current_codex_dir(app)?;
-    if current
-        .join("node_modules/@openai/codex/package.json")
-        .is_file()
-    {
-        return Ok(());
-    }
-
-    let resource_root = app
-        .path()
-        .resource_dir()
-        .map_err(|error| error.to_string())?;
-    let candidates = [
-        resource_root.join("codex"),
-        resource_root.join("resources/codex"),
-    ];
-    let source = candidates
-        .iter()
-        .find(|candidate| candidate.join("node_modules/@openai/codex/package.json").is_file())
-        .ok_or_else(|| {
-            format!(
-                "应用私有 Codex 尚未安装；请准备安装包内 resources/codex 或在更新页安装 @openai/codex 到 {}",
-                current.display()
-            )
-        })?;
-    if current.exists() {
-        fs::remove_dir_all(&current).map_err(|error| error.to_string())?;
-    }
-    copy_dir(source, &current)?;
-    Ok(())
+pub fn delivery_root() -> Result<PathBuf, String> {
+    let roaming = std::env::var_os("APPDATA").ok_or_else(|| "APPDATA 不可用".to_string())?;
+    Ok(PathBuf::from(roaming).join("com.tauri.codex"))
 }
 
-fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|error| error.to_string())?;
-    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if source_path.is_dir() {
-            copy_dir(&source_path, &destination_path)?;
-        } else {
-            fs::copy(&source_path, &destination_path).map_err(|error| error.to_string())?;
+pub fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let source = source
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let target = target
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+            .map_err(std::io::Error::other)
         }
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        fs::rename(source, target)
+    }
 }
 
 #[cfg(test)]
@@ -333,12 +289,6 @@ pub fn servers_file(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn config_file(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(codex_home(app)?.join("config.toml"))
-}
-
-pub fn updates_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = app_data_root(app)?.join("updates");
-    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
-    Ok(path)
 }
 
 pub fn safe_filename(value: &str) -> String {

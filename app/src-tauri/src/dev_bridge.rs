@@ -221,28 +221,10 @@ fn dispatch(app: &AppHandle, state: &AppState, call: BridgeCall) -> Result<Value
             app.clone(),
             argument(&call.args, "settings")?,
         )?),
-        "check_app_update" => value(commands::check_app_update()?),
-        "check_codex_update" => value(commands::check_codex_update(app.clone())?),
-        "stage_app_update" => value(commands::stage_app_update(app.clone())?),
-        "stage_codex_update" => value(commands::stage_codex_update(
-            app.clone(),
-            argument(&call.args, "version")?,
-        )?),
-        "install_codex_update" => value(commands::install_codex_update_inner(
-            app,
-            state,
-            argument(&call.args, "version")?,
-        )?),
-        "activate_codex_update" => value(commands::activate_codex_update_inner(
-            app,
-            state,
-            argument(&call.args, "version")?,
-        )?),
-        "apply_app_update" => value(commands::apply_app_update_inner(
-            app,
-            state,
-            argument(&call.args, "path")?,
-        )?),
+        "check_update" => value(commands::check_update()?),
+        "prepare_update" => value(commands::prepare_update()?),
+        "activate_update" => value(commands::activate_update_inner(state)?),
+        "cancel_update" => value(commands::cancel_update()?),
         _ => Err(format!("浏览器开发桥接不支持命令：{}", call.command)),
     }
 }

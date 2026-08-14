@@ -2,40 +2,89 @@
 
 Status: Active
 Kind: Runbook
-Scope: tauri-codex / Windows x64 构建、NSIS 制品与 GitHub Actions 触发
+Scope: tauri-codex / Windows x64 构建、NSIS 候选与 OSS 发布
 Owner: 项目维护者
-Updated: 2026-08-13
+Updated: 2026-08-14
 Depends On:
+- ../当前设计.md
 - ../../../../package.json
 - ../../../../app/build-versions.json
+- ../../../../app/installer-versions.json
 - ../../../../.github/workflows/ci.yml
 - ../../../../.github/workflows/windows-release.yml
 
-所有根脚本从工作空间根目录执行。固定组件版本由 `app/build-versions.json` 唯一管理，Manager 版本由 `app/package.json` 管理，稳定 Installer 版本与首次发布 tag 由 `app/installer-versions.json` 管理；本地候选制品和校验清单只写入 Git 忽略的 `.codex-build/`。Installer 是薄安装器，运行时组件同时作为 GitHub Release 资产和固定 OSS object key 发布。
+所有根脚本从工作空间根目录执行。Manager 版本由 `app/package.json` 管理，Codex/Node 固定输入由 `app/build-versions.json` 管理，Installer/Launcher 版本由 `app/installer-versions.json` 管理。候选、缓存、签名中间文件和校验结果只写入 Git 忽略的 `.codex-build/`。
 
-网络资源缓存也固定在 `.codex-build/cache/`：Node.js MSI 按 SHA-256 保存于 `node/<sha256>/`，Codex 安装使用同一目录下的 `npm/` 缓存，Rust 依赖沿用 Cargo 的用户缓存。资源只有在摘要校验通过后才会从 `.partial` 原子改名为正式缓存文件；损坏缓存会被丢弃并重新下载，`.partial` 文件永远不会被复用。Node/Codex 所需条目命中缓存时不重复下载。需要代理时由执行环境提供代理变量（例如 Windows `curl.exe` 支持的 `ALL_PROXY`），不会写入应用配置。
+## 交付约束
+
+- 固定公开根是 `https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/`。Installer、signed Bootstrap、signed manifest、Manager、Codex、Node fallback 和 checksum 只发布到该前缀。
+- GitHub 只保存源码、tag、Release Notes 和 OSS 链接，不上传 binary asset。
+- schema v2 不兼容 schema v1；本版本不构建 legacy Bootstrap 或旧 Launcher bridge。
+- Manager、Codex 与 Node 由同一个 signed manifest 发布。Codex 不从 npm registry 做运行时更新。
+- 构建候选时先完成 Authenticode/Ed25519 签名，再计算 size/SHA-256。生产构建缺少签名身份直接失败，私钥不得写入仓库或日志。
+- Installer/Launcher 行为变化时才递增 Installer 版本；普通 release 复用 OSS 上已发布且可匿名回读的稳定 Installer。
+
+## 脚本
 
 | 脚本 | 职责 | 副作用 |
 |---|---|---|
-| `bootstrap` | 检查 Rust GNU、Rust target、MSYS2 UCRT64，执行 `npm ci` 并准备固定 Codex/Node 资源；优先复用 `.codex-build/cache/` | 修改 `app/node_modules`、缓存与被忽略的资源目录 |
-| `build` | 编译 Windows x64 release 应用，不生成安装包 | 写入 `.codex-build/build/` 与 Tauri target |
-| `installer:build` | 显式构建 Launcher 与 Manager；Installer 版本首次发布时生成 NSIS，普通 release 复用其 GitHub 公开资产；同时生成 Codex/Node 组件资产、manifest 和 Bootstrap | 写入 `.codex-build/releases/`、Bootstrap 与 Tauri target |
-| `installer:verify` | 校验薄 Installer、manifest、组件文件大小和 SHA-256、Bootstrap 闭包，以及 Manager ZIP 中的 EXE 与 `WebView2Loader.dll` 完整闭包 | 只读 |
-| `build:release` | 依次执行 bootstrap、installer build、installer verify | 只生成本机候选，不上传、不安装 |
-| `verify:release` | 对已有候选重复执行 release 验证 | 只读 |
-| `publish:release:oss -- preflight <version>` | 用一次性项目探针验证 OSS 凭据写入、匿名回读与精确清理；不读取或输出 Secret 值 | 需要 Actions `oss-release` 环境中的 OSS Secret；仅短暂改变并清理探针对象 |
-| `publish:release:oss -- stage <version>` | 从冻结候选上传或复用 OSS 不可变 Installer、组件与 manifest，逐个匿名回读，不移动 Bootstrap | 需要 Actions `oss-release` 环境中的 OSS Secret；改变公开不可变 OSS 对象 |
-| `publish:release:oss -- commit <version>` | 校验 GitHub 与 OSS 均公开提供同一候选后，最后提交并确认 `bootstrap/windows-x64.json` | 需要 Actions `oss-release` 环境中的 OSS Secret；改变公开 OSS Bootstrap |
-| `publish:release:oss -- retire <old-version> <old-installer-version> <replacement-version>` | 仅在 GitHub/OSS 替代 Bootstrap 同字节生效后，按旧 Bootstrap 与 manifest 精确删除旧 Installer、组件和 manifest，逐项确认 404 | 只由手工 Retire Workflow 使用 `oss-release` Secret；不移动 Bootstrap、不接受前缀或通配符 |
-| `release:patch` | 当前 `main` 已完成且需要准备下一个补丁版本 | 自动读取当前版本并同步应用版本文件；提交、tag 和发布分别由 Git 收口与 Deployment 执行 |
-| `test:rust` / `test` | 运行 Rust 格式、类型检查与定向单测；`test` 另含前端和文档门禁 | 只写入被忽略构建缓存 |
+| `bootstrap` | 检查 Rust GNU/MSYS2，安装锁定依赖并准备固定 Codex/Node 构建输入 | 写入依赖目录与 `.codex-build/cache/` |
+| `build` | 编译未发布的 Windows x64 Launcher 和 Manager | 写入 `.codex-build/build/` 与 Tauri target |
+| `installer:build` | 从一个冻结 source/version 构建并签名 Launcher、Manager、Codex/Node components、manifest、Bootstrap 和需要时的 NSIS | 写入 `.codex-build/releases/<version>/windows-x64/` |
+| `installer:verify` | 验证候选 identity、signed envelope、object key、size/SHA-256、组件闭包、Manager ZIP、Authenticode 要求和冻结元数据 | 只读 |
+| `build:release` | 依次执行 bootstrap、候选构建与候选验证 | 只生成本地候选，不上传、不安装 |
+| `verify:release` | 对已有冻结候选重复验证，不重建同版本 | 只读 |
+| `publish:release:oss -- preflight <version>` | 用项目探针验证 OSS 凭据写入与匿名回读，不输出 Secret | 短暂创建并精确删除 probe object |
+| `publish:release:oss -- stage <version>` | 上传或复用全部不可变对象，并逐个匿名回读验证；不移动 Bootstrap | 改变 OSS 不可变对象 |
+| `publish:release:oss -- commit <version>` | 重新验证完整 OSS closure 后最后提交唯一 mutable Bootstrap | 改变 OSS Bootstrap |
+| `release:patch` | 计算下一 Manager patch；Installer 版本保持独立 | 修改版本源，仍不发布 |
+| `test:rust` / `test` | 运行 Development 白盒门禁 | 只写入忽略的构建缓存 |
 
-兼容入口 `app:bundle` 等价于 `installer:build`；开发入口仍是 `app:dev`。完成一轮已授权代码变更后，`npm run release:patch` 自动递增 patch 并同步 `package.json`、lockfile 与 Cargo 版本，不修改独立 Installer 版本，也不要求用户预先计算版本号；Launcher 或 Installer 行为变化时另行递增 `app/installer-versions.json` 并让 `releaseTag` 指向该 Installer 首次发布 tag。版本改动随候选通过 Git 收口精确提交，Deployment 再为该提交创建 `vX.Y.Z` tag。GitHub Actions 的 `ci.yml` 在 Pull Request、`main` 推送和手工触发时先用根 `bootstrap` 准备锁定依赖与组件构建资源，再执行依赖审计和 `npm test`。`windows-release.yml` 在 `vX.Y.Z` tag 或手工触发时执行同一 bootstrap 与源码门禁，再执行 `build:release` 和 `verify:release`；tag 发布先由 `oss-preflight` 验证受保护环境 Secret 及项目 OSS 写读权限，候选构建后由 `oss-stage` 上传并匿名回读全部不可变对象，随后才公开 GitHub Release，最后由 `oss-commit` 复核两端同字节闭包并提交 OSS Bootstrap。任一前置阶段失败时 GitHub Release 不公开，任一后置阶段失败时旧 OSS Bootstrap 保持可用；重试复用相同候选与不可变对象。稳定 Installer 首次发布 tag 上传 NSIS，普通 tag 复用其 GitHub 与 OSS 不可变对象。
+## 签名输入
 
-重试时直接重复同一个脚本即可。固定版本不匹配、工具链缺失、资源版本不一致或校验失败时脚本立即停止；网络恢复后，已验证缓存会避免重复下载，不覆盖已存在的不同候选。setup-msys2 的安装根由 Action 动态决定，CI 与 Release Workflow 都在其 `msys2 {0}` shell 中把 `/ucrt64/bin` 转为 Windows 路径并通过 `TAURI_MINGW_BIN` 交给根脚本，不依赖 runner 临时目录。GitHub Actions 通过 `actions/cache@v4` 恢复 `.codex-build/cache`、Cargo registry/git 和 Tauri target，缓存键包含 `app/package-lock.json`、`app/build-versions.json` 与 `Cargo.lock`；这些缓存不是发布资产。
+生产候选要求执行环境提供以下非空配置，脚本只检查存在性和公私钥匹配，不输出值：
 
-不可用公开版本只能通过 `.github/workflows/retire-windows-release.yml` 手工撤回。操作者必须提供旧 Manager、旧 Installer 和已激活替代 Manager 三个稳定版本；工作流先验证 OSS 当前 Bootstrap 与替代 GitHub Bootstrap 同字节，再删除旧版本精确 OSS object key，旧 manifest 最后删除并逐项确认匿名 404，随后删除精确旧 tag 和 GitHub Release。替代未激活、当前 Bootstrap 仍引用旧 Installer、旧身份不匹配或任一删除未生效时立即停止；幂等重跑不得扩大到目录、前缀、本机 previous release 或替代版本。
+- `TAURI_CODEX_RELEASE_KEY_ID`
+- `TAURI_CODEX_RELEASE_PRIVATE_KEY`：base64 PKCS#8 Ed25519 private key
+- `TAURI_CODEX_RELEASE_PUBLIC_KEY`：base64 raw 32-byte Ed25519 public key，同时编译进 Launcher trust policy
+- `TAURI_CODEX_AUTHENTICODE_THUMBPRINT`
+- `TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL`
 
-Manager 组件归档必须同时包含非空的 `tauri-codex-manager.exe` 与同目录 `WebView2Loader.dll`，不得依赖 Installer 目录或调用者工作目录提供动态库。Launcher 在该目录运行有超时的 `--runtime-check` 后才允许 stage/激活，并以同一目录作为正式启动工作目录；缺文件、doctor 失败或超时均保留当前可用 release。
+GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD` 临时导入当前用户证书库并生成 thumbprint；PFX 只存在于 runner 临时文件，步骤结束即删除。Local build 仍可直接使用已安装证书的 thumbprint。
 
-客户端交付的最终验收必须同时覆盖首次安装和普通客户端更新两条真实路径。首次安装从公开 Release 下载该 Installer 首次发布的 Setup，核对公开大小与 SHA-256 后安装，确认安装登记、桌面快捷方式、Manager 运行时闭包和窗口启动均可用。普通客户端更新必须另外发布一个复用相同 Installer 版本的更高 Manager 版本，从已安装的上一 Manager 通过界面中的检查更新和用户明确确认完成下载、校验、stage 与激活；验收后 Manager/current 必须变为新版本、previous 必须保留上一版本，Windows 安装登记中的 Installer 版本必须保持不变，且过程中不得下载或运行新的 Setup。只有这两条路径、GitHub/OSS 公开闭包和启动健康检查全部通过，才可报告客户端发布最终通过。
+本地白盒测试可以生成进程内 ephemeral Ed25519 key 和 test certificate，只能落入 `.codex-build/`，不得形成正式候选或进入 OSS。
+
+## 候选事务
+
+1. 固定 source commit、Manager version、Installer version、Codex version、Node version、key ID 和 object keys。
+2. 清理当前版本输出后只构建一次。签名 Launcher/Manager/Installer 与需验证的 Windows 组件，生成 Manager/Codex/Node immutable payload。
+3. 生成并 Ed25519 签名 manifest，再生成并签名 Bootstrap；写入 `candidate.json` 固定所有 bytes、size、SHA-256、key ID 和路径。
+4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
+5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
+6. 完整匿名回读 closure 后，`commit` 最后写 `bootstrap/windows-x64.json` 并再次匿名读取同 bytes。
+7. OSS closure 生效后，GitHub Workflow 创建 tag 对应 Release Notes，正文只含 OSS Installer/manifest 链接，不上传文件。
+
+任一步失败都不得改写冻结候选或移动 Bootstrap；重试复用同一 `candidate.json`。同版本 bytes 不一致必须换版本，不能覆盖。
+
+## 构建图门禁
+
+- Vite 必须产出 `index.html` 与 `launcher.html`。
+- Cargo 必须显式产出 `tauri-codex.exe` Launcher 和 `tauri-codex-manager.exe` Manager。
+- Manager ZIP 必须包含非空 `tauri-codex-manager.exe` 与同目录 `WebView2Loader.dll`。
+- NSIS 必须嵌入 signed Bootstrap seed、许可证与 Installer-owned 资源，不携带 Manager/Codex/Node payload。
+- 稳定 Installer 复用时从 OSS immutable object 读取并验证，禁止从 GitHub 下载或依赖本地旧文件。
+- 首次公开新构建图前必须至少完成一次仅保留依赖缓存的 clean-output build。
+
+## GitHub Workflow
+
+`windows-release.yml` 只接受受保护的 `workflow_dispatch`：`oss-preflight → build-once → oss-stage → oss-commit → github-release-notes`。Job 之间只传同一个短期 candidate artifact；只有 OSS closure 完整匿名回读并提交 Bootstrap 后，最后一个 Job 才创建 GitHub tag/Release Notes。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
+
+本 Runbook 不构成 Deployment 授权。向 OSS 写对象、移动 Bootstrap 或公开 Release Notes 必须由单独授权的 Deployment 执行。
+
+## 故障处理
+
+- 缺少生产 Ed25519 或 Authenticode identity：停止候选构建，不降级为 unsigned。
+- OSS preflight、上传或匿名回读失败：保留不可变对象供同候选重试，不提交 Bootstrap。
+- candidate metadata 与本地 bytes 不一致：停止并废弃该版本，不重建覆盖。
+- schema、platform、architecture、compatibility、签名、size、digest 或 object key 不一致：拒绝候选。
+- 不得改用 GitHub、npm registry 或其他 binary origin 绕过 OSS 故障。

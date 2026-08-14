@@ -1,10 +1,10 @@
+use crate::delivery::{self, CheckTrigger, UpdateIntent, UpdateResult, UpdateState};
 use crate::model::{
-    AppSnapshot, CodexSettings, CodexUpdateInfo, ServerProfile, ServerSummary, TerminalInstance,
-    UpdateResult, DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    AppSnapshot, CodexSettings, ServerProfile, ServerSummary, TerminalInstance,
+    DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
 };
 use crate::paths;
 use crate::sessions::SessionManager;
-use crate::updates;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
@@ -98,8 +98,21 @@ pub fn snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot, String
         codex_settings,
         servers: servers.iter().map(ServerSummary::from).collect(),
         terminals: state.sessions.list()?,
-        pending_codex_versions: paths::pending_codex_versions(app)?,
-        staged_app_updates: updates::staged_app_updates(app)?,
+        delivery: delivery::manager_snapshot().unwrap_or_else(|error| delivery::DeliverySnapshot {
+            state: UpdateState::Failed,
+            target: None,
+            current_version: None,
+            current_codex_version: paths::codex_version(app).ok().flatten(),
+            current_node_version: None,
+            active_sessions: state.sessions.active_count(),
+            phase: "broker-unavailable".to_string(),
+            component: "Launcher Broker".to_string(),
+            downloaded: 0,
+            total: 0,
+            error: Some(error),
+            checked_at: None,
+            operation_id: None,
+        }),
     })
 }
 
@@ -629,94 +642,42 @@ pub fn force_terminate_terminal(state: State<'_, AppState>, id: String) -> Resul
 }
 
 #[tauri::command]
-pub fn check_app_update() -> Result<crate::model::ReleaseInfo, String> {
-    updates::check_release()
+pub fn check_update() -> Result<delivery::DeliverySnapshot, String> {
+    delivery::manager_intent(UpdateIntent::Check {
+        trigger: CheckTrigger::Manual,
+    })
 }
 
 #[tauri::command]
-pub fn check_codex_update(app: AppHandle) -> Result<CodexUpdateInfo, String> {
-    updates::check_codex_update(&app)
+pub fn prepare_update() -> Result<delivery::DeliverySnapshot, String> {
+    delivery::manager_intent(UpdateIntent::Prepare)
 }
 
 #[tauri::command]
-pub fn stage_app_update(app: AppHandle) -> Result<UpdateResult, String> {
-    updates::stage_latest_release(&app)
-}
-
-#[tauri::command]
-pub fn stage_codex_update(app: AppHandle, version: String) -> Result<UpdateResult, String> {
-    updates::stage_codex(&app, &version)
-}
-
-#[tauri::command]
-pub fn install_codex_update(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    version: String,
-) -> Result<UpdateResult, String> {
-    install_codex_update_inner(&app, &state, version)
-}
-
-pub(crate) fn install_codex_update_inner(
-    app: &AppHandle,
-    state: &AppState,
-    version: String,
-) -> Result<UpdateResult, String> {
-    let staged = updates::stage_codex(app, &version)?;
-    if active_instance_count(state) == 0 {
-        updates::activate_codex(app, &staged.version)
-    } else {
-        Ok(UpdateResult {
-            kind: "codex-waiting".to_string(),
-            ..staged
-        })
+pub fn activate_update(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateResult, String> {
+    let result = activate_update_inner(state.inner())?;
+    if result.state == UpdateState::Activating {
+        app.exit(0);
     }
+    Ok(result)
+}
+
+pub(crate) fn activate_update_inner(state: &AppState) -> Result<UpdateResult, String> {
+    let snapshot = delivery::manager_intent(UpdateIntent::Activate {
+        active_sessions: active_instance_count(state),
+    })?;
+    Ok(UpdateResult {
+        state: snapshot.state,
+        target: snapshot.target,
+        message: snapshot
+            .error
+            .unwrap_or_else(|| "Launcher 已接受激活请求".to_string()),
+    })
 }
 
 #[tauri::command]
-pub fn activate_codex_update(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    version: String,
-) -> Result<UpdateResult, String> {
-    activate_codex_update_inner(&app, &state, version)
-}
-
-pub(crate) fn activate_codex_update_inner(
-    app: &AppHandle,
-    state: &AppState,
-    version: String,
-) -> Result<UpdateResult, String> {
-    if active_instance_count(state) != 0 {
-        return Err(format!(
-            "仍有 {} 个活动任务；请先停止后再应用 Codex 更新",
-            active_instance_count(state)
-        ));
-    }
-    updates::activate_codex(app, &version)
-}
-
-#[tauri::command]
-pub fn apply_app_update(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<(), String> {
-    apply_app_update_inner(&app, &state, path)
-}
-
-pub(crate) fn apply_app_update_inner(
-    app: &AppHandle,
-    state: &AppState,
-    path: String,
-) -> Result<(), String> {
-    if active_instance_count(state) != 0 {
-        return Err(format!(
-            "仍有 {} 个活动任务；更新将在任务归零后应用",
-            active_instance_count(state)
-        ));
-    }
-    updates::launch_desktop_update(app, &path)
+pub fn cancel_update() -> Result<delivery::DeliverySnapshot, String> {
+    delivery::manager_intent(UpdateIntent::Cancel)
 }
 
 fn active_instance_count(state: &AppState) -> usize {

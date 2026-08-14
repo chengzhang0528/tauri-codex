@@ -1,3 +1,4 @@
+use crate::delivery::DeliverySnapshot;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MODEL_AUTO_COMPACT_TOKEN_LIMIT: u64 = 272_000;
@@ -79,57 +80,5 @@ pub struct AppSnapshot {
     pub codex_settings: CodexSettings,
     pub servers: Vec<ServerSummary>,
     pub terminals: Vec<TerminalInstance>,
-    pub pending_codex_versions: Vec<String>,
-    pub staged_app_updates: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReleaseAsset {
-    pub name: String,
-    pub download_url: String,
-    pub size: u64,
-    pub digest: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReleaseInfo {
-    pub tag_name: String,
-    pub name: String,
-    pub html_url: String,
-    pub published_at: Option<String>,
-    pub update_available: bool,
-    pub assets: Vec<ReleaseAsset>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct UpdateResult {
-    pub version: String,
-    pub path: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GithubReleaseResponse {
-    pub tag_name: String,
-    pub name: Option<String>,
-    pub html_url: String,
-    pub published_at: Option<String>,
-    #[serde(default)]
-    pub assets: Vec<GithubAssetResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GithubAssetResponse {
-    pub name: String,
-    pub browser_download_url: String,
-    pub size: u64,
-    #[serde(default)]
-    pub digest: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CodexUpdateInfo {
-    pub current_version: Option<String>,
-    pub latest_version: String,
-    pub update_available: bool,
+    pub delivery: DeliverySnapshot,
 }

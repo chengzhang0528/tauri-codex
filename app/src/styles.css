@@ -308,7 +308,12 @@ svg { width: 17px; height: 17px; stroke-width: 1.8; }
 .setting-copy small { margin-top: 5px; color: var(--muted); font-size: 10px; }
 .setting-copy code { overflow: hidden; margin-top: 6px; color: #666b62; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .version-tag { justify-self: end; color: #666b62; font: 10px "Cascadia Mono", Consolas, monospace; }
-.update-button { width: 132px; }
+.update-heading { gap: 20px; }
+.update-actions { display: flex; align-items: center; gap: 8px; }
+.update-primary { width: 148px; min-height: 36px; justify-content: center; }
+.update-component-row { grid-template-columns: minmax(0, 1fr) 110px; }
+.update-progress { position: relative; height: 3px; overflow: hidden; background: #e4e7e1; }
+.update-progress span { display: block; width: 0; height: 100%; background: #377b58; transition: width .18s ease; }
 .path-row { grid-template-columns: minmax(0, 1fr) 36px; }
 
 .session-launcher-backdrop { position: fixed; inset: 0; z-index: 15; display: grid; place-items: center; padding: 24px; background: #1f281f2b; }

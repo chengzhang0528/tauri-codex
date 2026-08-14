@@ -1,24 +1,21 @@
 {
-  "schemaVersion": 1,
-  "product": "tauri-codex",
-  "platform": "windows",
-  "architecture": "x86_64",
-  "installer": {
-    "version": "1.0.4",
-    "artifact": {
-      "url": "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.9/tauri-codex_1.0.4_x64-setup.exe",
-      "objectKey": "installers/1.0.4/windows-x64/tauri-codex_1.0.4_x64-setup.exe",
-      "size": 7530389,
-      "sha256": "a1298388de731b99a82e41874d74ac0bb6d31e6516af6ea944840f0231c097ef"
+  "schemaVersion": 2,
+  "keyId": "development-rfc8032",
+  "payload": {
+    "product": "tauri-codex",
+    "platform": "windows",
+    "architecture": "x86_64",
+    "minimumLauncherVersion": "1.1.0",
+    "installer": null,
+    "release": {
+      "version": "0.2.0",
+      "manifest": {
+        "objectKey": "releases/0.2.0/windows-x64/manifest.json",
+        "size": 1,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "provenance": "ed25519"
+      }
     }
   },
-  "release": {
-    "version": "0.1.10",
-    "manifest": {
-      "url": "https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.10/manifest.json",
-      "objectKey": "releases/0.1.10/windows-x64/manifest.json",
-      "size": 1649,
-      "sha256": "37ee83c1669984261530e388bcb4624ffbcbc9c1f749160fd85bc05b0d76967c"
-    }
-  }
+  "signature": "N5oLI+O08Dcd3aPJwNWmyw1zc0uGG2EVKBB9T/2aEO4XVaEUthVlKzuKDyLb/ccBFqzH1pskHycn5pe6VA5fBw=="
 }

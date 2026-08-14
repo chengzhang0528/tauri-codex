@@ -8,12 +8,13 @@ Updated: 2026-08-10
 Depends On:
 - ../../WORKSPACE_STRUCTURE.md
 
-当前产品契约与技术决策已建立，源码根为 [app](../../../app/AGENTS.md)；尚无独立服务、端口或 Runbook。
+当前产品契约、客户端交付 CurrentDesign、技术决策与 Runbook 已建立，源码根为 [app](../../../app/AGENTS.md)；没有独立服务或端口。
 
 ## 路由
 
 - 产品目标、首个交付边界和产品不变量：读 [产品契约](产品契约.md)。
 - Windows x64 封装、原生 Codex TUI、并发隔离、配置与 Codex 更新方向：读 [DEC-0001](决策/DEC-0001-Windows-x64-Codex桌面封装方案.md)。
+- Launcher/Broker、OSS 单源、签名协议、更新事务、激活与 forward-repair：读 [当前设计](当前设计.md)。
 - 社区许可、商业双重授权、第三方出处与贡献再许可：读 [DEC-0002](决策/DEC-0002-GPLv3与商业双重授权.md)。
 - 根脚本、固定构建版本、安装包验证与 GitHub Actions 触发：读 [Windows构建与发布根脚本](运行/RUN-0001-Windows构建与发布根脚本.md)。
 - 源码实现、命令与验证：读 [app 源码入口](../../../app/AGENTS.md)。

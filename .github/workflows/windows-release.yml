@@ -1,18 +1,15 @@
 name: tauri-codex Windows release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: "必须与 app/package.json 一致的版本"
+        description: "必须与 app/package.json 一致且尚未发布的 Manager 版本"
         required: true
-        default: "0.1.0"
+        default: "0.2.0"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: tauri-codex-windows-release
@@ -20,13 +17,10 @@ concurrency:
 
 jobs:
   oss-preflight:
-    name: Verify OSS publisher admission
-    if: github.ref_type == 'tag'
+    name: OSS publisher admission
     runs-on: windows-latest
     timeout-minutes: 10
     environment: oss-release
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -39,52 +33,50 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-        run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          npm run publish:release:oss -- preflight $version
+        run: npm run publish:release:oss -- preflight ${{ inputs.version }}
 
-  build:
-    name: Build and verify Windows x64 NSIS
+  build-once:
+    name: Build and verify one signed Windows x64 candidate
+    needs: [oss-preflight]
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+    environment: oss-release
     outputs:
       version: ${{ steps.release.outputs.version }}
+      installer-version: ${{ steps.release.outputs.installer-version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Resolve release version
+      - name: Resolve immutable release identity
         id: release
         shell: pwsh
         run: |
-          $version = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}" -replace '^v', ''
-          } else {
-            "${{ inputs.version }}"
-          }
+          $version = "${{ inputs.version }}"
           if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
             throw "Invalid release version: $version"
           }
           $appVersion = (Get-Content -Raw app/package.json | ConvertFrom-Json).version
+          $installerVersion = (Get-Content -Raw app/installer-versions.json | ConvertFrom-Json).installerVersion
           if ($version -ne $appVersion) {
             throw "Release version $version does not match app/package.json $appVersion"
           }
+          if (git tag --list "v$version") {
+            throw "Tag v$version already exists"
+          }
+          $latest = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | ForEach-Object { $_.Substring(1) } | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if ($latest -and ([version]$version -le [version]$latest)) {
+            throw "Release version $version must be newer than $latest"
+          }
           "version=$version" >> $env:GITHUB_OUTPUT
+          "installer-version=$installerVersion" >> $env:GITHUB_OUTPUT
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24.19.0
-
-      - name: Restore build caches
-        uses: actions/cache@v4
-        with:
-          path: |
-            .codex-build/cache
-            ~/.cargo/registry
-            ~/.cargo/git
-            app/src-tauri/target
-          key: ${{ runner.os }}-windows-x64-build-${{ hashFiles('app/package-lock.json', 'app/build-versions.json', 'app/src-tauri/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-windows-x64-build-
+          cache: npm
+          cache-dependency-path: app/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,6 +94,27 @@ jobs:
         shell: msys2 {0}
         run: echo "TAURI_MINGW_BIN=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_ENV"
 
+      - name: Import ephemeral Authenticode identity
+        shell: pwsh
+        env:
+          TAURI_CODEX_AUTHENTICODE_PFX_BASE64: ${{ secrets.TAURI_CODEX_AUTHENTICODE_PFX_BASE64 }}
+          TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_CODEX_AUTHENTICODE_PFX_BASE64 -or -not $env:TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD) {
+            throw "Authenticode PFX identity is required"
+          }
+          New-Item -ItemType Directory -Force .codex-build | Out-Null
+          $pfx = Join-Path $PWD '.codex-build/signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:TAURI_CODEX_AUTHENTICODE_PFX_BASE64))
+          try {
+            $password = ConvertTo-SecureString $env:TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false
+            if (-not $certificate.Thumbprint) { throw "PFX did not import a signing certificate" }
+            "TAURI_CODEX_AUTHENTICODE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Bootstrap locked build inputs
         shell: pwsh
         run: npm run bootstrap
@@ -112,34 +125,30 @@ jobs:
           npm run audit:dependencies
           npm test
 
-      - name: Build release candidate
+      - name: Build and verify frozen release candidate
         shell: pwsh
         env:
           TAURI_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
+          TAURI_CODEX_RELEASE_PRIVATE_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PRIVATE_KEY }}
+          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
+          TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL: ${{ secrets.TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL }}
         run: npm run build:release
 
-      - name: Verify release candidate
-        shell: pwsh
-        env:
-          TAURI_RELEASE_VERSION: ${{ steps.release.outputs.version }}
-        run: npm run verify:release
-
-      - name: Upload installer artifact
+      - name: Upload frozen candidate for job handoff only
         uses: actions/upload-artifact@v4
         with:
-          name: tauri-codex_${{ steps.release.outputs.version }}_windows-x64
+          name: tauri-codex_${{ steps.release.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/*
           if-no-files-found: error
+          retention-days: 1
 
   oss-stage:
-    name: Stage verified OSS immutable closure
-    if: github.ref_type == 'tag'
-    needs: [oss-preflight, build]
+    name: Stage OSS immutable closure
+    needs: [build-once]
     runs-on: windows-latest
     timeout-minutes: 20
     environment: oss-release
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -147,65 +156,62 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - name: Download exact Windows x64 candidate
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
-          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
+          name: tauri-codex_${{ needs.build-once.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.build-once.outputs.version }}/windows-x64
 
-      - name: Upload and read back immutable objects without moving Bootstrap
+      - name: Upload and anonymously read back immutable objects
         shell: pwsh
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-        run: npm run publish:release:oss -- stage ${{ needs.build.outputs.version }}
+          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
+          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
+        run: npm run publish:release:oss -- stage ${{ needs.build-once.outputs.version }}
 
-  github-release:
-    name: Publish GitHub Release assets
-    if: github.ref_type == 'tag'
-    needs: [build, oss-stage]
+  oss-commit:
+    name: Commit OSS Bootstrap last
+    needs: [build-once, oss-stage]
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    environment: oss-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.build-once.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.build-once.outputs.version }}/windows-x64
+
+      - name: Re-read closure and commit the mutable Bootstrap
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
+          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
+        run: npm run publish:release:oss -- commit ${{ needs.build-once.outputs.version }}
+
+  github-release-notes:
+    name: Create GitHub tag and OSS-only Release Notes
+    needs: [build-once, oss-commit]
+    runs-on: windows-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Download exact Windows x64 candidate
-        uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
         with:
-          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
-          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
-
-      - name: Publish GitHub Release assets
-        uses: softprops/action-gh-release@v2
-        with:
+          tag_name: v${{ needs.build-once.outputs.version }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64/**/*
+          body: |
+            ## Windows x64 downloads
 
-  oss-commit:
-    name: Verify both origins and commit OSS Bootstrap
-    if: github.ref_type == 'tag'
-    needs: [build, github-release]
-    runs-on: windows-latest
-    timeout-minutes: 20
-    environment: oss-release
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.19.0
-
-      - name: Download exact Windows x64 candidate
-        uses: actions/download-artifact@v4
-        with:
-          name: tauri-codex_${{ needs.build.outputs.version }}_windows-x64
-          path: .codex-build/releases/${{ needs.build.outputs.version }}/windows-x64
-
-      - name: Verify GitHub and OSS bytes, then commit Bootstrap last
-        shell: pwsh
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-        run: npm run publish:release:oss -- commit ${{ needs.build.outputs.version }}
+            - [Installer](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/${{ needs.build-once.outputs.installer-version }}/windows-x64/tauri-codex_${{ needs.build-once.outputs.installer-version }}_x64-setup.exe)
+            - [Signed release manifest](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/releases/${{ needs.build-once.outputs.version }}/windows-x64/manifest.json)

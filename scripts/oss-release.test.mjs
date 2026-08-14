@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { signEnvelope } from "./windows-pipeline.mjs";
 import {
   commitRelease,
   compareVersions,
@@ -11,78 +12,93 @@ import {
   ossAuthorization,
   preflightPublisher,
   publishRelease,
-  retireRelease,
   safeObjectKey,
   stageRelease,
 } from "./oss-release.mjs";
 
 const baseURL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
+const keyId = "test-release-key";
+const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+const releasePublicKey = publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
+const trust = { keyId, privateKey, publicKey };
+const publisherTrust = { releaseKeyId: keyId, releasePublicKey };
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function artifact(url, objectKey, bytes) {
-  return { url, objectKey, size: bytes.length, sha256: digest(bytes) };
+function artifact(objectKey, bytes, provenance) {
+  return { objectKey, size: bytes.length, sha256: digest(bytes), provenance };
 }
 
-function fixture(version = "0.1.8", installerVersion = "1.0.3") {
-  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-oss-release-"));
-  const components = path.join(root, "components");
-  mkdirSync(components);
-  const manager = Buffer.from("manager");
-  const codex = Buffer.from("codex");
-  const node = Buffer.from("node");
-  const installer = Buffer.from("installer");
-  const managerName = `tauri-codex-manager-${version}-windows-x64.zip`;
-  const codexName = "tauri-codex-codex-0.147.0-windows-x64.zip";
-  const nodeName = "node-v24.19.0-x64.msi";
-  const installerName = `tauri-codex_${installerVersion}_x64-setup.exe`;
-  const releaseURL = `https://github.com/chengzhang0528/tauri-codex/releases/download/v${version}`;
-  const manifest = {
-    schemaVersion: 1, product: "tauri-codex", version, platform: "windows", architecture: "x86_64",
+function jsonBytes(value) {
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-oss-v2-"));
+  const componentsRoot = path.join(root, "components");
+  mkdirSync(componentsRoot);
+  const blobs = {
+    manager: Buffer.from(`manager-${version}`),
+    codex: Buffer.from("codex-0.147.0"),
+    node: Buffer.from("node-24.19.0"),
+    installer: Buffer.from(`installer-${installerVersion}`),
+  };
+  const names = {
+    manager: `tauri-codex-manager-${version}-windows-x64.zip`,
+    codex: "tauri-codex-codex-0.147.0-windows-x64.zip",
+    node: "node-v24.19.0-x64.msi",
+    installer: `tauri-codex_${installerVersion}_x64-setup.exe`,
+  };
+  const records = {
+    manager: artifact(`releases/${version}/windows-x64/components/${names.manager}`, blobs.manager, "authenticode+ed25519"),
+    codex: artifact(`releases/${version}/windows-x64/components/${names.codex}`, blobs.codex, "authenticode+ed25519"),
+    node: artifact(`releases/${version}/windows-x64/components/${names.node}`, blobs.node, "authenticode+ed25519"),
+    installer: artifact(`installers/${installerVersion}/windows-x64/${names.installer}`, blobs.installer, "authenticode+ed25519"),
+  };
+  const manifestPayload = {
+    product: "tauri-codex", version, platform: "windows", architecture: "x86_64",
+    minimumLauncherVersion: installerVersion, minimumManagerVersion: version,
     components: [
-      { id: "manager", version, required: true, artifact: artifact(`${releaseURL}/${managerName}`, `releases/${version}/windows-x64/components/${managerName}`, manager) },
-      { id: "codex", version: "0.147.0", required: true, artifact: artifact(`${releaseURL}/${codexName}`, `releases/${version}/windows-x64/components/${codexName}`, codex) },
-      { id: "node", version: "24.19.0", required: true, artifact: artifact(`${releaseURL}/${nodeName}`, `releases/${version}/windows-x64/components/${nodeName}`, node) },
+      { id: "manager", version, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: records.manager.provenance, artifact: records.manager },
+      { id: "codex", version: "0.147.0", kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: records.codex.provenance, artifact: records.codex },
+      { id: "node", version: "24.19.0", kind: "system", archive: "msi", required: true, installPath: "system", provenance: records.node.provenance, artifact: records.node },
     ],
   };
-  const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
-  const bootstrap = {
-    schemaVersion: 1, product: "tauri-codex", platform: "windows", architecture: "x86_64",
-    installer: { version: installerVersion, artifact: artifact(
-      `https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.8/${installerName}`,
-      `installers/${installerVersion}/windows-x64/${installerName}`, installer,
-    ) },
-    release: { version, manifest: artifact(`${releaseURL}/manifest.json`, `releases/${version}/windows-x64/manifest.json`, manifestBytes) },
+  const manifestBytes = jsonBytes(signEnvelope(manifestPayload, trust));
+  records.manifest = artifact(`releases/${version}/windows-x64/manifest.json`, manifestBytes, "ed25519");
+  const bootstrapPayload = {
+    product: "tauri-codex", platform: "windows", architecture: "x86_64", minimumLauncherVersion: installerVersion,
+    installer: { version: installerVersion, artifact: records.installer },
+    release: { version, manifest: records.manifest },
   };
-  writeFileSync(path.join(root, "bootstrap.json"), `${JSON.stringify(bootstrap, null, 2)}\n`);
+  const bootstrapBytes = jsonBytes(signEnvelope(bootstrapPayload, trust));
   writeFileSync(path.join(root, "manifest.json"), manifestBytes);
-  writeFileSync(path.join(root, installerName), installer);
-  writeFileSync(path.join(components, managerName), manager);
-  writeFileSync(path.join(components, codexName), codex);
-  writeFileSync(path.join(components, nodeName), node);
-  const github = new Map([
-    [`${releaseURL}/bootstrap.json`, Buffer.from(`${JSON.stringify(bootstrap, null, 2)}\n`)],
-    [bootstrap.installer.artifact.url, installer],
-    [bootstrap.release.manifest.url, manifestBytes],
-    ...manifest.components.map((component, index) => [component.artifact.url, [manager, codex, node][index]]),
-  ]);
-  return { root, bootstrap, manifest, github };
+  writeFileSync(path.join(root, "bootstrap.json"), bootstrapBytes);
+  for (const role of ["manager", "codex", "node"]) writeFileSync(path.join(componentsRoot, names[role]), blobs[role]);
+  if (!options.reuseInstaller) writeFileSync(path.join(root, names.installer), blobs.installer);
+  const immutable = [
+    { role: "manifest", localPath: "manifest.json", artifact: records.manifest },
+    ...["manager", "codex", "node"].map((role) => ({ role, localPath: `components/${names[role]}`, artifact: records[role] })),
+    { role: "installer", localPath: options.reuseInstaller ? null : names.installer, artifact: records.installer },
+  ];
+  const candidatePayload = {
+    product: "tauri-codex", version, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit: "a".repeat(40),
+    bootstrap: { localPath: "bootstrap.json", objectKey: OSS_BOOTSTRAP_KEY, size: bootstrapBytes.length, sha256: digest(bootstrapBytes), provenance: "ed25519" },
+    immutable,
+  };
+  writeFileSync(path.join(root, "candidate.json"), jsonBytes(signEnvelope(candidatePayload, trust)));
+  return { root, records, blobs, bootstrapBytes, candidatePayload };
 }
 
-function fakeFetch(github, options = {}) {
+function fakeFetch(options = {}) {
   const objects = new Map(options.objects ?? []);
   const events = [];
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(input);
     const method = init.method ?? "GET";
     const key = url.href.startsWith(`${baseURL}/`) ? url.href.slice(baseURL.length + 1) : null;
-    if (url.hostname === "github.com") {
-      events.push(`github:${url.pathname}`);
-      const bytes = github.get(url.href);
-      return new Response(bytes ?? "missing", { status: bytes ? 200 : 404 });
-    }
     if (key && method === "GET") {
       events.push(`get:${key}`);
       if (options.failGet === key) return new Response("injected", { status: 500 });
@@ -92,9 +108,7 @@ function fakeFetch(github, options = {}) {
     if (key && method === "PUT") {
       events.push(`put:${key}`);
       if (options.failPut === key) return new Response("injected", { status: 500 });
-      if (init.headers["x-oss-forbid-overwrite"] === "true" && objects.has(key)) {
-        return new Response("exists", { status: 409 });
-      }
+      if (init.headers["x-oss-forbid-overwrite"] === "true" && objects.has(key)) return new Response("exists", { status: 409 });
       objects.set(key, Buffer.from(init.body));
       return new Response("", { status: 200 });
     }
@@ -108,18 +122,20 @@ function fakeFetch(github, options = {}) {
   return { fetchImpl, objects, events };
 }
 
+function publishOptions(release, remote) {
+  return { releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, ...publisherTrust };
+}
+
 test("validates object keys, versions, and OSS signatures", () => {
-  assert.equal(safeObjectKey("releases/0.1.8/windows-x64/manifest.json"), true);
-  assert.equal(safeObjectKey("releases/0.1.8/../secret"), false);
-  assert.equal(compareVersions("0.1.8", "0.1.7"), 1);
+  assert.equal(safeObjectKey("releases/0.2.0/windows-x64/manifest.json"), true);
+  assert.equal(safeObjectKey("releases/0.2.0/../secret"), false);
+  assert.equal(compareVersions("0.2.0", "0.1.9"), 1);
   assert.match(ossAuthorization({ method: "PUT", contentType: "application/json", date: "Thu, 13 Aug 2026 00:00:00 GMT", key: OSS_BOOTSTRAP_KEY, secret: "secret", accessKeyId: "id" }), /^OSS id:/);
 });
 
 test("publisher admission proves public readback and removes its exact probe", async () => {
-  const remote = fakeFetch(new Map());
-  const result = await preflightPublisher({
-    accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, probeId: "run-1",
-  });
+  const remote = fakeFetch();
+  const result = await preflightPublisher({ accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, probeId: "run-1" });
   assert.equal(result.admitted, true);
   assert.deepEqual(remote.events, [
     "put:probes/tauri-codex-run-1.txt",
@@ -130,146 +146,100 @@ test("publisher admission proves public readback and removes its exact probe", a
   assert.equal(remote.objects.size, 0);
 });
 
-test("stages immutable objects without publishing Bootstrap", async () => {
+test("stages immutable objects without moving Bootstrap", async () => {
   const release = fixture();
-  const oldBootstrap = Buffer.from(JSON.stringify({ installer: { version: "1.0.2" }, release: { version: "0.1.7" } }));
-  const remote = fakeFetch(release.github, { objects: [[OSS_BOOTSTRAP_KEY, oldBootstrap]] });
+  const old = fixture("0.1.9", "1.0.9");
+  const remote = fakeFetch({ objects: [[OSS_BOOTSTRAP_KEY, old.bootstrapBytes]] });
   try {
-    await stageRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl });
-    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), oldBootstrap);
+    await stageRelease(publishOptions(release, remote));
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), old.bootstrapBytes);
     assert.equal(remote.events.includes(`put:${OSS_BOOTSTRAP_KEY}`), false);
-    assert.equal(remote.events.some((event) => event.startsWith("github:")), false);
+    for (const item of release.candidatePayload.immutable) assert.deepEqual(remote.objects.get(item.artifact.objectKey), release.blobs[item.role] ?? readFileSync(path.join(release.root, item.localPath)));
   } finally {
     rmSync(release.root, { recursive: true, force: true });
+    rmSync(old.root, { recursive: true, force: true });
   }
 });
 
-test("stages a reused stable Installer from its existing GitHub asset", async () => {
-  const release = fixture("0.1.9", "1.0.3");
-  const installerName = path.posix.basename(release.bootstrap.installer.artifact.objectKey);
-  rmSync(path.join(release.root, installerName));
-  const remote = fakeFetch(release.github);
+test("reuses a stable Installer only after OSS identity readback", async () => {
+  const release = fixture("0.2.1", "1.1.0", { reuseInstaller: true });
+  const remote = fakeFetch({ objects: [[release.records.installer.objectKey, release.blobs.installer]] });
   try {
-    await stageRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl });
-    assert.deepEqual(remote.objects.get(release.bootstrap.installer.artifact.objectKey), release.github.get(release.bootstrap.installer.artifact.url));
-    assert.equal(remote.events.some((event) => event.startsWith("github:") && event.includes(installerName)), true);
-    assert.equal(remote.events.includes(`put:${OSS_BOOTSTRAP_KEY}`), false);
+    await stageRelease(publishOptions(release, remote));
+    assert.equal(remote.events.includes(`put:${release.records.installer.objectKey}`), false);
+    assert.equal(remote.events.includes(`get:${release.records.installer.objectKey}`), true);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
   }
 });
 
-test("publishes immutable closure, reads it back, and commits Bootstrap last", async () => {
+test("publishes the immutable closure and commits Bootstrap last", async () => {
   const release = fixture();
-  const remote = fakeFetch(release.github);
+  const remote = fakeFetch();
   try {
-    const result = await publishRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl });
-    assert.equal(result.release, "0.1.8");
-    const puts = remote.events.filter((event) => event.startsWith("put:"));
-    assert.equal(puts.at(-1), `put:${OSS_BOOTSTRAP_KEY}`);
-    for (const component of release.manifest.components) assert.deepEqual(remote.objects.get(component.artifact.objectKey), release.github.get(component.artifact.url));
+    const result = await publishRelease(publishOptions(release, remote));
+    assert.equal(result.release, "0.2.0");
+    assert.equal(remote.events.filter((event) => event.startsWith("put:")).at(-1), `put:${OSS_BOOTSTRAP_KEY}`);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), release.bootstrapBytes);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
   }
 });
 
-test("does not commit Bootstrap after an immutable object failure", async () => {
+test("immutable upload failure leaves the old Bootstrap untouched", async () => {
   const release = fixture();
-  const managerKey = release.manifest.components[0].artifact.objectKey;
-  const oldBootstrap = Buffer.from(JSON.stringify({
-    installer: { version: "1.0.2" },
-    release: { version: "0.1.7" },
-  }));
-  const remote = fakeFetch(release.github, { objects: [[OSS_BOOTSTRAP_KEY, oldBootstrap]], failPut: managerKey });
+  const old = fixture("0.1.9", "1.0.9");
+  const remote = fakeFetch({ objects: [[OSS_BOOTSTRAP_KEY, old.bootstrapBytes]], failPut: release.records.manager.objectKey });
   try {
-    await assert.rejects(() => publishRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl }));
-    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), oldBootstrap);
-    assert.equal(remote.events.includes(`put:${managerKey}`), true);
+    await assert.rejects(() => publishRelease(publishOptions(release, remote)));
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), old.bootstrapBytes);
     assert.equal(remote.events.includes(`put:${OSS_BOOTSTRAP_KEY}`), false);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
+    rmSync(old.root, { recursive: true, force: true });
   }
 });
 
-test("does not commit Bootstrap unless GitHub exposes the frozen candidate", async () => {
+test("commit refuses an incomplete OSS closure", async () => {
   const release = fixture();
-  const oldBootstrap = Buffer.from(JSON.stringify({ installer: { version: "1.0.2" }, release: { version: "0.1.7" } }));
-  const remote = fakeFetch(release.github, { objects: [[OSS_BOOTSTRAP_KEY, oldBootstrap]] });
+  const remote = fakeFetch();
   try {
-    await stageRelease({ releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl });
-    release.github.delete(`https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.8/bootstrap.json`);
-    await assert.rejects(() => commitRelease({
-      releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
-    }), /GitHub Bootstrap/);
-    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), oldBootstrap);
+    await assert.rejects(() => commitRelease(publishOptions(release, remote)), /identity mismatch/);
+    assert.equal(remote.events.includes(`put:${OSS_BOOTSTRAP_KEY}`), false);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
   }
 });
 
-test("retires only an old release closure after its replacement is active", async () => {
-  const oldRelease = fixture("0.1.8", "1.0.3");
-  const replacement = fixture("0.1.9", "1.0.4");
-  const currentBytes = replacement.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.9/bootstrap.json");
-  const oldManifestKey = oldRelease.bootstrap.release.manifest.objectKey;
-  const objects = [
-    [OSS_BOOTSTRAP_KEY, currentBytes],
-    [oldManifestKey, Buffer.from(`${JSON.stringify(oldRelease.manifest, null, 2)}\n`)],
-    [oldRelease.bootstrap.installer.artifact.objectKey, oldRelease.github.get(oldRelease.bootstrap.installer.artifact.url)],
-    ...oldRelease.manifest.components.map((component) => [component.artifact.objectKey, oldRelease.github.get(component.artifact.url)]),
-  ];
-  const github = new Map([...oldRelease.github, ...replacement.github]);
-  const remote = fakeFetch(github, { objects });
+test("candidate signature and frozen bytes reject mutation", async () => {
+  const release = fixture();
+  const remote = fakeFetch();
   try {
-    const result = await retireRelease({
-      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
-      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
-    });
-    assert.equal(result.retired, true);
-    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), currentBytes);
-    assert.equal(remote.events.filter((event) => event.startsWith("delete:")).at(-1), `delete:${oldManifestKey}`);
-    for (const key of result.deletedKeys) assert.equal(remote.objects.has(key), false);
+    const candidatePath = path.join(release.root, "candidate.json");
+    const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
+    candidate.payload.version = "0.2.1";
+    writeFileSync(candidatePath, jsonBytes(candidate));
+    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /signature/);
+
+    writeFileSync(candidatePath, jsonBytes(signEnvelope(release.candidatePayload, trust)));
+    writeFileSync(path.join(release.root, "components", path.basename(release.records.manager.objectKey)), "mutated");
+    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /bytes/);
   } finally {
-    rmSync(oldRelease.root, { recursive: true, force: true });
-    rmSync(replacement.root, { recursive: true, force: true });
+    rmSync(release.root, { recursive: true, force: true });
   }
 });
 
-test("retirement refuses to remove a release before the replacement Bootstrap is active", async () => {
-  const oldRelease = fixture("0.1.8", "1.0.3");
-  const oldBytes = oldRelease.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.8/bootstrap.json");
-  const remote = fakeFetch(oldRelease.github, { objects: [[OSS_BOOTSTRAP_KEY, oldBytes]] });
+test("commit rejects a signed Bootstrap downgrade", async () => {
+  const current = fixture("0.2.1", "1.1.0");
+  const older = fixture("0.2.0", "1.1.0");
+  const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
+  for (const item of older.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(older.root, item.localPath)) : older.blobs.installer]);
+  const remote = fakeFetch({ objects });
   try {
-    await assert.rejects(() => retireRelease({
-      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
-      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
-    }), /has not activated/);
-    assert.equal(remote.events.some((event) => event.startsWith("delete:")), false);
+    await assert.rejects(() => commitRelease(publishOptions(older, remote)), /downgrade/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), current.bootstrapBytes);
   } finally {
-    rmSync(oldRelease.root, { recursive: true, force: true });
-  }
-});
-
-test("retirement preserves an Installer still referenced by the replacement", async () => {
-  const oldRelease = fixture("0.1.8", "1.0.3");
-  const replacement = fixture("0.1.9", "1.0.3");
-  const currentBytes = replacement.github.get("https://github.com/chengzhang0528/tauri-codex/releases/download/v0.1.9/bootstrap.json");
-  const objects = [
-    [OSS_BOOTSTRAP_KEY, currentBytes],
-    [oldRelease.bootstrap.release.manifest.objectKey, Buffer.from(`${JSON.stringify(oldRelease.manifest, null, 2)}\n`)],
-    [oldRelease.bootstrap.installer.artifact.objectKey, oldRelease.github.get(oldRelease.bootstrap.installer.artifact.url)],
-    ...oldRelease.manifest.components.map((component) => [component.artifact.objectKey, oldRelease.github.get(component.artifact.url)]),
-  ];
-  const remote = fakeFetch(new Map([...oldRelease.github, ...replacement.github]), { objects });
-  try {
-    const result = await retireRelease({
-      oldVersion: "0.1.8", oldInstallerVersion: "1.0.3", replacementVersion: "0.1.9",
-      accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl,
-    });
-    assert.equal(result.deletedKeys.includes(oldRelease.bootstrap.installer.artifact.objectKey), false);
-    assert.equal(remote.objects.has(oldRelease.bootstrap.installer.artifact.objectKey), true);
-  } finally {
-    rmSync(oldRelease.root, { recursive: true, force: true });
-    rmSync(replacement.root, { recursive: true, force: true });
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(older.root, { recursive: true, force: true });
   }
 });

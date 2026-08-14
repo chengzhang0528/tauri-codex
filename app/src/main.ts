@@ -56,23 +56,29 @@ type Snapshot = {
   codex_settings: CodexSettings;
   servers: ServerSummary[];
   terminals: TerminalInstance[];
-  pending_codex_versions: string[];
-  staged_app_updates: string[];
+  delivery: DeliverySnapshot;
 };
-type ReleaseAsset = { name: string; download_url: string; size: number; digest?: string | null };
-type ReleaseInfo = {
-  tag_name: string;
-  name: string;
-  html_url: string;
-  published_at: string | null;
-  update_available: boolean;
-  assets: ReleaseAsset[];
+type UpdateStateName = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "verifying" | "staged" | "waiting_for_drain" | "activating" | "health_check" | "ready" | "failed" | "repair_required";
+type UpdateTarget = { release: { version: string } } | { installer: { version: string } };
+type DeliverySnapshot = {
+  state: UpdateStateName;
+  target: UpdateTarget | null;
+  currentVersion: string | null;
+  currentCodexVersion: string | null;
+  currentNodeVersion: string | null;
+  activeSessions: number;
+  phase: string;
+  component: string;
+  downloaded: number;
+  total: number;
+  error: string | null;
+  checkedAt: number | null;
+  operationId: string | null;
 };
-type CodexUpdateInfo = { current_version: string | null; latest_version: string; update_available: boolean };
-type UpdateResult = { version: string; path: string; kind: string };
+type UpdateResult = { state: UpdateStateName; target: UpdateTarget | null; message: string };
 type ControlView = "sessions" | "api" | "settings" | "updates";
 type StatusTone = "neutral" | "error" | "success";
-type UpdateState = { release?: ReleaseInfo; codex?: CodexUpdateInfo; checking: boolean; checkedAt?: number };
+type UpdateViewState = { delivery: DeliverySnapshot; busy: boolean };
 
 const iconSet = {
   ArrowLeft,
@@ -306,7 +312,9 @@ async function renderControl(): Promise<void> {
   // is intentionally transient so a previous visit to settings cannot produce
   // an unexpected or incomplete first screen after relaunch.
   let activeView: ControlView = "sessions";
-  let updateState: UpdateState = { checking: false };
+  let updateState: UpdateViewState = { delivery: snapshot.delivery, busy: false };
+  let updateEpoch = 0;
+  const beginUpdate = (): void => { updateEpoch += 1; };
   let draftWorkdir = normalizeWorkdir(window.localStorage.getItem("last-workdir") ?? "");
   let recentWorkdirs = loadWorkdirs(draftWorkdir);
   if (!draftWorkdir && recentWorkdirs.length > 0) draftWorkdir = recentWorkdirs[0];
@@ -625,7 +633,9 @@ async function renderControl(): Promise<void> {
     return activeTerminalEnded;
   };
   const refreshSnapshot = async (rerender = true): Promise<void> => {
+    const requestEpoch = updateEpoch;
     snapshot = await call<Snapshot>("get_snapshot");
+    if (!updateState.busy && requestEpoch === updateEpoch) updateState.delivery = snapshot.delivery;
     if (!snapshot.servers.some((server) => server.id === draftServerId)) {
       draftServerId = snapshot.servers.find((server) => server.is_default)?.id ?? "";
     }
@@ -754,32 +764,19 @@ async function renderControl(): Promise<void> {
     if (event.target === event.currentTarget) (event.currentTarget as HTMLElement).hidden = true;
   });
   const checkUpdates = async (silent = false): Promise<void> => {
-    if (updateState.checking) return;
-    updateState.checking = true;
+    if (updateState.busy) return;
+    updateEpoch += 1;
+    updateState.busy = true;
     renderUpdatePanel(snapshot, updateState);
     if (!silent) setStatus("正在检查更新");
     try {
-      const [release, codex] = await Promise.all([
-        call<ReleaseInfo>("check_app_update"),
-        call<CodexUpdateInfo>("check_codex_update"),
-      ]);
-      updateState = { release, codex, checking: true, checkedAt: Date.now() };
-      const staging: Promise<unknown>[] = [];
-      if (release.update_available) staging.push(call("stage_app_update"));
-      if (codex.update_available) {
-        staging.push(call("stage_codex_update", { version: codex.latest_version }));
-      }
-      if (staging.length > 0) {
-        const results = await Promise.allSettled(staging);
-        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-        await refreshSnapshot(false);
-        if (failures.length > 0 && !silent) setStatus(`自动更新暂存失败：${String(failures[0].reason)}`, "error");
-      }
-      if (!silent) setStatus(`${release.tag_name ? `桌面 ${release.tag_name}` : "桌面暂无发布版本"}，Codex ${codex.latest_version}`, "success");
+      const delivery = await call<DeliverySnapshot>("check_update");
+      updateState.delivery = delivery;
+      if (!silent) setStatus(delivery.state === "available" ? `${targetLabel(delivery.target)} 可用` : "当前 release 已是最新版本", "success");
     } catch (error) {
       if (!silent) setStatus(String(error), "error");
     } finally {
-      updateState.checking = false;
+      updateState.busy = false;
       renderUpdatePanel(snapshot, updateState);
     }
   };
@@ -821,13 +818,13 @@ async function renderControl(): Promise<void> {
       meta.textContent = `应用 ${snapshot.app_version}`;
       actions.innerHTML = "";
       renderSettingsView(snapshot);
-      bindSettingsView(snapshot, refreshSnapshot, checkUpdates);
+      bindSettingsView(snapshot, refreshSnapshot);
     } else {
       title.textContent = "更新";
       meta.textContent = `应用 ${snapshot.app_version}`;
       actions.innerHTML = "";
       renderUpdatesView(snapshot, updateState);
-      bindUpdatesView(snapshot, refreshSnapshot, checkUpdates);
+      bindUpdatesView(snapshot, refreshSnapshot, checkUpdates, updateState, beginUpdate);
     }
     mountIcons();
   };
@@ -870,8 +867,7 @@ async function renderControl(): Promise<void> {
     stateListener();
     for (const id of [...terminals.keys()]) disposeTerminal(id);
   }, { once: true });
-  void checkUpdates(true);
-  window.setInterval(() => void checkUpdates(true), 6 * 60 * 60 * 1000);
+  window.setInterval(() => void refreshSnapshot(false), 2_000);
 }
 
 function renderSessionsView(snapshot: Snapshot, draftWorkdir: string): void {
@@ -1069,15 +1065,17 @@ function renderSettingsView(snapshot: Snapshot): void {
     </div>`;
 }
 
-function renderUpdatesView(snapshot: Snapshot, updateState: UpdateState): void {
+function renderUpdatesView(snapshot: Snapshot, updateState: UpdateViewState): void {
   const content = document.querySelector<HTMLElement>("#view-content");
   if (!content) return;
   content.innerHTML = `
     <div class="content-stack settings-stack updates-stack">
       <section class="settings-section">
-        <div class="section-heading settings-heading"><div><h2>应用更新</h2><small>下载和应用会在这里明确显示</small></div><button class="button button-secondary" id="check-update" type="button"></button></div>
-        <div class="setting-row"><div class="setting-copy"><strong>桌面应用</strong><small id="desktop-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.app_version)}</span><button class="button button-secondary update-button" id="desktop-update-action" type="button"></button></div>
-        <div class="setting-row"><div class="setting-copy"><strong>内置 Codex</strong><small id="codex-update-summary">尚未检查</small></div><span class="version-tag">${escapeHtml(snapshot.codex_version ?? "未安装")}</span><button class="button button-secondary update-button" id="codex-update-action" type="button"></button></div>
+        <div class="section-heading settings-heading update-heading"><div><h2>应用更新</h2><small id="update-summary"></small></div><div class="update-actions"><button class="icon-button" id="cancel-update" type="button" title="取消更新" aria-label="取消更新" hidden><i data-lucide="x"></i></button><button class="button button-primary update-primary" id="update-primary" type="button"></button></div></div>
+        <div class="update-progress" id="update-progress" hidden><span id="update-progress-bar"></span></div>
+        <div class="setting-row update-component-row"><div class="setting-copy"><strong>Manager</strong><small>桌面主程序</small></div><span class="version-tag">${escapeHtml(updateState.delivery.currentVersion ?? snapshot.app_version)}</span></div>
+        <div class="setting-row update-component-row"><div class="setting-copy"><strong>Codex</strong><small>应用私有组件</small></div><span class="version-tag">${escapeHtml(updateState.delivery.currentCodexVersion ?? snapshot.codex_version ?? "未安装")}</span></div>
+        <div class="setting-row update-component-row"><div class="setting-copy"><strong>Node.js</strong><small>系统运行时</small></div><span class="version-tag">${escapeHtml(updateState.delivery.currentNodeVersion ?? "系统")}</span></div>
       </section>
     </div>`;
   renderUpdatePanel(snapshot, updateState);
@@ -1087,14 +1085,48 @@ function bindUpdatesView(
   snapshot: Snapshot,
   refreshSnapshot: (rerender?: boolean) => Promise<void>,
   checkUpdates: (silent?: boolean) => Promise<void>,
+  updateState: UpdateViewState,
+  beginUpdate: () => void,
 ): void {
-  bindSettingsView(snapshot, refreshSnapshot, checkUpdates);
+  document.querySelector<HTMLButtonElement>("#update-primary")?.addEventListener("click", async () => {
+    if (updateState.busy) return;
+    const state = updateState.delivery.state;
+    if (["idle", "up_to_date", "ready", "failed"].includes(state)) {
+      await checkUpdates();
+      return;
+    }
+    updateState.busy = true;
+    beginUpdate();
+    renderUpdatePanel(snapshot, updateState);
+    try {
+       if (state === "available" || state === "repair_required" || (state === "failed" && updateState.delivery.target)) {
+         updateState.delivery = await call<DeliverySnapshot>("prepare_update");
+         setStatus(`${targetLabel(updateState.delivery.target)} 已开始准备`, "neutral");
+      } else if (state === "staged" || state === "waiting_for_drain") {
+        const result = await call<UpdateResult>("activate_update");
+        setStatus(result.message, result.state === "waiting_for_drain" ? "neutral" : "success");
+      }
+      await refreshSnapshot(false);
+    } catch (error) {
+      setStatus(String(error), "error");
+    } finally {
+      updateState.busy = false;
+      renderUpdatePanel(snapshot, updateState);
+    }
+  });
+  document.querySelector<HTMLButtonElement>("#cancel-update")?.addEventListener("click", async () => {
+    try {
+      updateState.delivery = await call<DeliverySnapshot>("cancel_update");
+      renderUpdatePanel(snapshot, updateState);
+    } catch (error) {
+      setStatus(String(error), "error");
+    }
+  });
 }
 
 function bindSettingsView(
   snapshot: Snapshot,
   refreshSnapshot: (rerender?: boolean) => Promise<void>,
-  checkUpdates: (silent?: boolean) => Promise<void>,
 ): void {
   document.querySelector<HTMLFormElement>("#codex-settings-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1125,7 +1157,6 @@ function bindSettingsView(
       setStatus(String(error), "error");
     }
   });
-  document.querySelector<HTMLButtonElement>("#check-update")?.addEventListener("click", () => void checkUpdates());
   document.querySelector<HTMLButtonElement>("#copy-codex-home")?.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(snapshot.code_home);
@@ -1134,98 +1165,72 @@ function bindSettingsView(
       setStatus(String(error), "error");
     }
   });
-  document.querySelector<HTMLButtonElement>("#desktop-update-action")?.addEventListener("click", async () => {
-    const latest = await call<Snapshot>("get_snapshot");
-    const staged = latest.staged_app_updates[latest.staged_app_updates.length - 1];
-    if (staged) {
-      try {
-        await call("apply_app_update", { path: staged });
-      } catch (error) {
-        setStatus(String(error), "error");
-      }
-      return;
-    }
-    const release = await call<ReleaseInfo>("check_app_update");
-    if (!release.update_available) return;
-    try {
-      const result = await call<UpdateResult>("stage_app_update");
-      setStatus(`桌面更新 ${result.version} 已暂存`, "success");
-      await refreshSnapshot();
-    } catch (error) {
-      setStatus(String(error), "error");
-    }
-  });
-  document.querySelector<HTMLButtonElement>("#codex-update-action")?.addEventListener("click", async () => {
-    try {
-      const latest = await call<Snapshot>("get_snapshot");
-      const update = await call<CodexUpdateInfo>("check_codex_update");
-      const pending = latest.pending_codex_versions[latest.pending_codex_versions.length - 1];
-      const result = pending
-        ? await call<UpdateResult>("activate_codex_update", { version: pending })
-        : await call<UpdateResult>("install_codex_update", { version: update.latest_version });
-      setStatus(result.kind === "codex-waiting" ? `Codex ${result.version} 等待应用` : `Codex ${result.version} 已更新`, "success");
-      await refreshSnapshot();
-      await checkUpdates(true);
-    } catch (error) {
-      setStatus(String(error), "error");
-    }
-  });
 }
 
-function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateState): void {
-  const checkButton = document.querySelector<HTMLButtonElement>("#check-update");
-  const desktopSummary = document.querySelector<HTMLElement>("#desktop-update-summary");
-  const codexSummary = document.querySelector<HTMLElement>("#codex-update-summary");
-  const desktopButton = document.querySelector<HTMLButtonElement>("#desktop-update-action");
-  const codexButton = document.querySelector<HTMLButtonElement>("#codex-update-action");
+function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateViewState): void {
+  const summary = document.querySelector<HTMLElement>("#update-summary");
+  const primary = document.querySelector<HTMLButtonElement>("#update-primary");
+  const cancel = document.querySelector<HTMLButtonElement>("#cancel-update");
+  const progress = document.querySelector<HTMLElement>("#update-progress");
+  const progressBar = document.querySelector<HTMLElement>("#update-progress-bar");
   const updateBadge = document.querySelector<HTMLElement>("#nav-update-status");
+  const delivery = updateState.delivery;
   if (updateBadge) {
-    const pending = snapshot.staged_app_updates.length > 0
-      || snapshot.pending_codex_versions.length > 0
-      || Boolean(updateState.release?.update_available || updateState.codex?.update_available);
+    const pending = ["available", "downloading", "verifying", "staged", "waiting_for_drain", "repair_required"].includes(delivery.state);
     updateBadge.textContent = pending ? "可用" : "";
     updateBadge.hidden = !pending;
   }
-  if (!checkButton || !desktopSummary || !codexSummary || !desktopButton || !codexButton) return;
-
-  setButtonContent(checkButton, updateState.checking ? "正在检查" : updateState.checkedAt ? "再次检查" : "检查更新", "refresh-cw");
-  checkButton.disabled = updateState.checking;
-
-  const release = updateState.release;
-  const desktopStaged = snapshot.staged_app_updates.length > 0;
-  if (updateState.checking) desktopSummary.textContent = "正在检查";
-  else if (desktopStaged) desktopSummary.textContent = `${snapshot.staged_app_updates[snapshot.staged_app_updates.length - 1]} 已暂存`;
-  else if (release?.tag_name) {
-    desktopSummary.textContent = release.update_available ? `${release.tag_name} 可用` : "已是最新版本";
-  } else if (release) desktopSummary.textContent = "GitHub Releases 暂无发布版本";
-  else desktopSummary.textContent = "尚未检查";
-  if (desktopStaged) {
-    setButtonContent(desktopButton, snapshot.terminals.length > 0 ? "会话运行中" : "重启并应用", "download");
-    desktopButton.disabled = snapshot.terminals.length > 0;
-  } else {
-    setButtonContent(desktopButton, release?.update_available ? "准备更新" : "暂无更新", "download");
-    desktopButton.disabled = updateState.checking || !release?.update_available;
-  }
-
-  const pendingCodex = snapshot.pending_codex_versions[snapshot.pending_codex_versions.length - 1];
-  if (updateState.checking) codexSummary.textContent = "正在检查";
-  else if (pendingCodex) codexSummary.textContent = `${pendingCodex} 已下载`;
-  else if (updateState.codex) {
-    codexSummary.textContent = updateState.codex.update_available
-      ? `${updateState.codex.current_version ?? "未安装"} → ${updateState.codex.latest_version}`
-      : `最新版本 ${updateState.codex.latest_version}`;
-  } else codexSummary.textContent = "尚未检查";
-  if (pendingCodex) {
-    setButtonContent(codexButton, snapshot.terminals.length > 0 ? "会话运行中" : "应用 Codex 更新", "download");
-    codexButton.disabled = snapshot.terminals.length > 0;
-  } else {
-    setButtonContent(codexButton, updateState.codex?.update_available ? "更新 Codex" : "暂无更新", "download");
-    codexButton.disabled = updateState.checking || !updateState.codex?.update_available;
-  }
+  if (!summary || !primary || !cancel || !progress || !progressBar) return;
+  summary.textContent = delivery.error ?? updateSummary(delivery, snapshot.terminals.length);
+  const working = updateState.busy || ["checking", "downloading", "verifying", "activating", "health_check"].includes(delivery.state);
+  const action = updateAction(delivery, snapshot.terminals.length);
+  setButtonContent(primary, working ? updateSummary(delivery, snapshot.terminals.length) : action.label, action.icon);
+  primary.disabled = working || action.disabled;
+  cancel.hidden = !["available", "downloading", "verifying", "staged", "waiting_for_drain", "failed", "repair_required"].includes(delivery.state);
+  const hasProgress = delivery.total > 0 && delivery.downloaded >= 0;
+  progress.hidden = !hasProgress;
+  progressBar.style.width = hasProgress ? `${Math.min(100, Math.round((delivery.downloaded / delivery.total) * 100))}%` : "0";
   mountIcons();
 }
 
-function setButtonContent(button: HTMLButtonElement, label: string, icon: "download" | "refresh-cw"): void {
+function targetLabel(target: UpdateTarget | null): string {
+  if (!target) return "更新";
+  if ("release" in target) return `Release ${target.release.version}`;
+  return `Installer ${target.installer.version}`;
+}
+
+function updateSummary(delivery: DeliverySnapshot, activeSessions: number): string {
+  switch (delivery.state) {
+    case "checking": return "正在检查";
+    case "up_to_date": return "已是最新版本";
+    case "available": return `${targetLabel(delivery.target)} 可用`;
+    case "downloading": return delivery.component ? `正在下载 ${delivery.component}` : "正在下载";
+    case "verifying": return delivery.component ? `正在验证 ${delivery.component}` : "正在验证";
+    case "staged": return activeSessions > 0 ? `已准备，等待 ${activeSessions} 个会话结束` : `${targetLabel(delivery.target)} 已准备`;
+    case "waiting_for_drain": return `等待 ${activeSessions} 个会话结束`;
+    case "activating": return "正在激活";
+    case "health_check": return "正在检查新版本";
+    case "ready": return "更新完成";
+    case "repair_required": return "需要修复目标版本";
+    case "failed": return "更新失败";
+    default: return "尚未检查";
+  }
+}
+
+function updateAction(delivery: DeliverySnapshot, activeSessions: number): { label: string; icon: "download" | "refresh-cw" | "rotate-ccw"; disabled: boolean } {
+  switch (delivery.state) {
+    case "available": return { label: "准备更新", icon: "download", disabled: false };
+    case "repair_required": return { label: "重新准备", icon: "rotate-ccw", disabled: false };
+    case "staged":
+    case "waiting_for_drain": return { label: activeSessions > 0 ? "会话运行中" : "重启并应用", icon: "rotate-ccw", disabled: activeSessions > 0 };
+     case "failed": return delivery.target
+       ? { label: "重试准备", icon: "rotate-ccw", disabled: false }
+       : { label: "再次检查", icon: "refresh-cw", disabled: false };
+    default: return { label: delivery.checkedAt ? "再次检查" : "检查更新", icon: "refresh-cw", disabled: false };
+  }
+}
+
+function setButtonContent(button: HTMLButtonElement, label: string, icon: "download" | "refresh-cw" | "rotate-ccw"): void {
   button.innerHTML = `<i data-lucide="${icon}"></i><span>${escapeHtml(label)}</span>`;
 }
 window.addEventListener("DOMContentLoaded", () => {

@@ -1,4 +1,5 @@
 mod commands;
+mod delivery;
 #[cfg(debug_assertions)]
 mod dev_bridge;
 mod host;
@@ -7,8 +8,6 @@ mod model;
 mod paths;
 mod runtime;
 mod sessions;
-mod thin;
-mod updates;
 
 use commands::AppState;
 use serde::Serialize;
@@ -59,15 +58,8 @@ pub fn run_manager() {
                 1
             });
         }
-        Some("--ensure-system-runtime") => {
-            std::process::exit(if runtime::ensure_system_node_from_install_dir().is_ok() {
-                0
-            } else {
-                1
-            });
-        }
         Some("--thin-setup") => {
-            std::process::exit(if thin::validate_installer_bootstrap().is_ok() {
+            std::process::exit(if delivery::validate_installer_bootstrap().is_ok() {
                 0
             } else {
                 1
@@ -114,13 +106,10 @@ pub fn run_manager() {
             commands::interrupt_terminal,
             commands::terminate_terminal,
             commands::force_terminate_terminal,
-            commands::check_app_update,
-            commands::check_codex_update,
-            commands::stage_app_update,
-            commands::stage_codex_update,
-            commands::install_codex_update,
-            commands::activate_codex_update,
-            commands::apply_app_update
+            commands::check_update,
+            commands::prepare_update,
+            commands::activate_update,
+            commands::cancel_update
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -137,7 +126,7 @@ pub fn run_manager() {
 }
 
 pub fn run_launcher() {
-    match thin::run_launcher_action() {
+    match delivery::run_launcher_action() {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
@@ -145,14 +134,19 @@ pub fn run_launcher() {
             std::process::exit(1);
         }
     }
-    match thin::launch_current_if_ready() {
-        Ok(true) => return,
-        Ok(false) => {}
-        Err(error) => eprintln!("Current release is unavailable: {error}"),
+    let root = paths::delivery_root().unwrap_or_else(|error| {
+        eprintln!("无法确定交付目录：{error}");
+        std::process::exit(1);
+    });
+    if delivery::current_release_healthy(&root) {
+        if let Err(error) = delivery::run_manager_broker(root) {
+            eprintln!("Launcher Broker failed: {error}");
+        }
+        return;
     }
 
     tauri::Builder::default()
-        .manage(thin::LauncherState::default())
+        .manage(delivery::LauncherState::default())
         .setup(|app| {
             WebviewWindowBuilder::new(app, "launcher", WebviewUrl::App("launcher.html".into()))
                 .title("tauri-codex")
@@ -160,19 +154,24 @@ pub fn run_launcher() {
                 .min_inner_size(460.0, 340.0)
                 .resizable(true)
                 .build()?;
-            thin::start_launcher_setup(
+            delivery::start_launcher_setup(
                 app.handle().clone(),
-                app.state::<thin::LauncherState>().inner(),
+                app.state::<delivery::LauncherState>().inner(),
             )
             .map_err(std::io::Error::other)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            thin::get_launcher_status,
-            thin::retry_launcher_setup
+            delivery::broker::get_launcher_status,
+            delivery::broker::retry_launcher_setup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri-codex launcher");
+    if let Ok(root) = paths::delivery_root() {
+        if delivery::current_release_healthy(&root) {
+            let _ = delivery::run_manager_broker(root);
+        }
+    }
 }
 
 #[cfg(all(test, debug_assertions))]
