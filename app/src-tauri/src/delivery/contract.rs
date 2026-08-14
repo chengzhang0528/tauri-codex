@@ -78,6 +78,8 @@ pub struct Component {
     pub artifact: Artifact,
     pub install_path: String,
     pub provenance: String,
+    #[serde(default)]
+    pub installed_tree_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +124,7 @@ pub enum UpdateState {
     Activating,
     HealthCheck,
     Ready,
+    RebootRequired,
     Failed,
     RepairRequired,
 }
@@ -266,6 +269,19 @@ pub fn validate_manifest(manifest: &Manifest, bootstrap: &BootstrapPayload) -> R
             ));
         }
         match component.id {
+            ComponentId::Manager | ComponentId::Codex => {
+                let digest = component
+                    .installed_tree_sha256
+                    .as_deref()
+                    .ok_or_else(|| format!("{} 缺少安装树 SHA-256", component.id.as_str()))?;
+                validate_sha256(digest, "安装树")?;
+            }
+            ComponentId::Node if component.installed_tree_sha256.is_some() => {
+                return Err("Node 系统组件不得声明安装树 SHA-256".to_string())
+            }
+            ComponentId::Node => {}
+        }
+        match component.id {
             ComponentId::Manager | ComponentId::Codex
                 if component.kind != "archive" || component.archive != "zip" =>
             {
@@ -350,19 +366,24 @@ pub fn validate_artifact(artifact: &Artifact, max_size: u64) -> Result<(), Strin
     if artifact.size == 0 || artifact.size > max_size {
         return Err(format!("artifact size 不在允许范围内：{}", artifact.size));
     }
-    let digest = artifact.sha256.trim().to_ascii_lowercase();
+    validate_sha256(&artifact.sha256, "artifact")?;
+    if artifact.provenance.trim().is_empty() {
+        return Err("artifact provenance 不能为空".to_string());
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<(), String> {
+    let digest = value.trim().to_ascii_lowercase();
     if digest.len() != 64
         || !digest
             .chars()
             .all(|character| character.is_ascii_hexdigit())
     {
-        return Err("artifact SHA-256 不合法".to_string());
+        return Err(format!("{label} SHA-256 不合法"));
     }
-    if artifact.sha256 != digest {
-        return Err("artifact SHA-256 必须使用小写十六进制".to_string());
-    }
-    if artifact.provenance.trim().is_empty() {
-        return Err("artifact provenance 不能为空".to_string());
+    if value != digest {
+        return Err(format!("{label} SHA-256 必须使用小写十六进制"));
     }
     Ok(())
 }
@@ -488,8 +509,9 @@ pub fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_url, canonical_json, newer, validate_object_key, verify_envelope, Artifact,
-        BootstrapPayload, ReleaseRef, SignedEnvelope,
+        artifact_url, canonical_json, newer, validate_manifest, validate_object_key,
+        verify_envelope, Artifact, BootstrapPayload, Component, ComponentId, ManifestPayload,
+        ReleaseRef, SignedEnvelope,
     };
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use ed25519_dalek::{Signer, SigningKey};
@@ -550,6 +572,45 @@ mod tests {
         }
     }
 
+    fn signed_manifest(payload: ManifestPayload) -> SignedEnvelope<ManifestPayload> {
+        let key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let bytes = canonical_json(&serde_json::to_value(&payload).unwrap());
+        SignedEnvelope {
+            schema_version: 2,
+            key_id: "development-rfc8032".to_string(),
+            payload,
+            signature: STANDARD.encode(key.sign(&bytes).to_bytes()),
+        }
+    }
+
+    fn component(id: ComponentId, tree: Option<String>) -> Component {
+        let (version, kind, archive, install_path, name) = match &id {
+            ComponentId::Manager => ("0.2.0", "archive", "zip", "manager", "manager.zip"),
+            ComponentId::Codex => ("0.147.0", "archive", "zip", "codex", "codex.zip"),
+            ComponentId::Node => ("24.19.0", "system", "msi", "system", "node.msi"),
+        };
+        Component {
+            id,
+            version: version.to_string(),
+            kind: kind.to_string(),
+            archive: archive.to_string(),
+            required: true,
+            artifact: Artifact {
+                object_key: format!("releases/0.2.0/windows-x64/components/{name}"),
+                size: 1,
+                sha256: "a".repeat(64),
+                provenance: "authenticode+ed25519".to_string(),
+            },
+            install_path: install_path.to_string(),
+            provenance: "authenticode+ed25519".to_string(),
+            installed_tree_sha256: tree,
+        }
+    }
+
     #[test]
     fn ed25519_envelope_accepts_exact_payload_and_rejects_mutation() {
         let mut envelope = signed_bootstrap();
@@ -577,5 +638,37 @@ mod tests {
         let mut value = serde_json::to_value(signed_bootstrap()).unwrap();
         value["unexpected"] = json!(true);
         assert!(serde_json::from_value::<SignedEnvelope<BootstrapPayload>>(value).is_err());
+    }
+
+    #[test]
+    fn manifest_requires_signed_archive_tree_digests_only_for_managed_directories() {
+        let payload = ManifestPayload {
+            product: "tauri-codex".to_string(),
+            version: "0.2.0".to_string(),
+            platform: "windows".to_string(),
+            architecture: "x86_64".to_string(),
+            minimum_launcher_version: "1.1.0".to_string(),
+            minimum_manager_version: "0.2.0".to_string(),
+            components: vec![
+                component(ComponentId::Manager, Some("b".repeat(64))),
+                component(ComponentId::Codex, Some("c".repeat(64))),
+                component(ComponentId::Node, None),
+            ],
+        };
+        validate_manifest(
+            &signed_manifest(payload.clone()),
+            &signed_bootstrap().payload,
+        )
+        .unwrap();
+
+        let mut missing = payload.clone();
+        missing.components[0].installed_tree_sha256 = None;
+        assert!(validate_manifest(&signed_manifest(missing), &signed_bootstrap().payload).is_err());
+
+        let mut node_tree = payload;
+        node_tree.components[2].installed_tree_sha256 = Some("d".repeat(64));
+        assert!(
+            validate_manifest(&signed_manifest(node_tree), &signed_bootstrap().payload).is_err()
+        );
     }
 }

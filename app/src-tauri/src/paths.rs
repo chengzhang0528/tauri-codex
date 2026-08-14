@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
@@ -242,9 +243,38 @@ pub fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     }
 }
 
+pub fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| std::io::Error::other("原子写入目标缺少父目录"))?;
+    fs::create_dir_all(parent)?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("原子写入目标缺少文件名"))?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        atomic_replace(&temporary, target)?;
+        #[cfg(not(windows))]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{codex_version_in, npm_cli_for_node};
+    use super::{codex_version_in, npm_cli_for_node, write_atomic};
     use std::fs;
 
     #[test]
@@ -276,6 +306,25 @@ mod tests {
         assert_eq!(
             codex_version_in(&root).expect("version").to_string(),
             "0.147.0"
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn atomically_replaces_a_fully_flushed_file() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-atomic-write-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).expect("create fixture");
+        let target = root.join("state.json");
+        write_atomic(&target, b"first").expect("write first state");
+        write_atomic(&target, b"second").expect("replace state");
+        assert_eq!(fs::read(&target).expect("read state"), b"second");
+        assert_eq!(
+            fs::read_dir(&root).expect("read fixture").count(),
+            1,
+            "temporary files must not remain"
         );
         fs::remove_dir_all(root).expect("remove fixture");
     }

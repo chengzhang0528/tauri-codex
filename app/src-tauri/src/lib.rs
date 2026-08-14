@@ -138,8 +138,15 @@ pub fn run_launcher() {
         eprintln!("无法确定交付目录：{error}");
         std::process::exit(1);
     });
+    let instance = delivery::acquire_launcher_instance().unwrap_or_else(|error| {
+        eprintln!("无法取得 Launcher 单实例所有权：{error}");
+        std::process::exit(1);
+    });
+    let Some(instance) = instance else {
+        return;
+    };
     if delivery::current_release_healthy(&root) {
-        if let Err(error) = delivery::run_manager_broker(root) {
+        if let Err(error) = delivery::run_manager_broker(root, instance) {
             eprintln!("Launcher Broker failed: {error}");
         }
         return;
@@ -169,7 +176,7 @@ pub fn run_launcher() {
         .expect("error while running tauri-codex launcher");
     if let Ok(root) = paths::delivery_root() {
         if delivery::current_release_healthy(&root) {
-            let _ = delivery::run_manager_broker(root);
+            let _ = delivery::run_manager_broker(root, instance);
         }
     }
 }

@@ -58,7 +58,7 @@ type Snapshot = {
   terminals: TerminalInstance[];
   delivery: DeliverySnapshot;
 };
-type UpdateStateName = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "verifying" | "staged" | "waiting_for_drain" | "activating" | "health_check" | "ready" | "failed" | "repair_required";
+type UpdateStateName = "idle" | "checking" | "up_to_date" | "available" | "downloading" | "verifying" | "staged" | "waiting_for_drain" | "activating" | "health_check" | "ready" | "reboot_required" | "failed" | "repair_required";
 type UpdateTarget = { release: { version: string } } | { installer: { version: string } };
 type DeliverySnapshot = {
   state: UpdateStateName;
@@ -1091,7 +1091,7 @@ function bindUpdatesView(
   document.querySelector<HTMLButtonElement>("#update-primary")?.addEventListener("click", async () => {
     if (updateState.busy) return;
     const state = updateState.delivery.state;
-    if (["idle", "up_to_date", "ready", "failed"].includes(state)) {
+    if (["idle", "up_to_date", "ready"].includes(state) || (state === "failed" && !updateState.delivery.target)) {
       await checkUpdates();
       return;
     }
@@ -1099,7 +1099,7 @@ function bindUpdatesView(
     beginUpdate();
     renderUpdatePanel(snapshot, updateState);
     try {
-       if (state === "available" || state === "repair_required" || (state === "failed" && updateState.delivery.target)) {
+       if (state === "available" || state === "reboot_required" || state === "repair_required" || (state === "failed" && updateState.delivery.target)) {
          updateState.delivery = await call<DeliverySnapshot>("prepare_update");
          setStatus(`${targetLabel(updateState.delivery.target)} 已开始准备`, "neutral");
       } else if (state === "staged" || state === "waiting_for_drain") {
@@ -1115,11 +1115,18 @@ function bindUpdatesView(
     }
   });
   document.querySelector<HTMLButtonElement>("#cancel-update")?.addEventListener("click", async () => {
+    if (updateState.busy) return;
+    updateState.busy = true;
+    beginUpdate();
+    renderUpdatePanel(snapshot, updateState);
     try {
       updateState.delivery = await call<DeliverySnapshot>("cancel_update");
-      renderUpdatePanel(snapshot, updateState);
+      await refreshSnapshot(false);
     } catch (error) {
       setStatus(String(error), "error");
+    } finally {
+      updateState.busy = false;
+      renderUpdatePanel(snapshot, updateState);
     }
   });
 }
@@ -1176,7 +1183,7 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateViewState): vo
   const updateBadge = document.querySelector<HTMLElement>("#nav-update-status");
   const delivery = updateState.delivery;
   if (updateBadge) {
-    const pending = ["available", "downloading", "verifying", "staged", "waiting_for_drain", "repair_required"].includes(delivery.state);
+    const pending = ["available", "downloading", "verifying", "staged", "waiting_for_drain", "reboot_required", "repair_required"].includes(delivery.state);
     updateBadge.textContent = pending ? "可用" : "";
     updateBadge.hidden = !pending;
   }
@@ -1186,7 +1193,8 @@ function renderUpdatePanel(snapshot: Snapshot, updateState: UpdateViewState): vo
   const action = updateAction(delivery, snapshot.terminals.length);
   setButtonContent(primary, working ? updateSummary(delivery, snapshot.terminals.length) : action.label, action.icon);
   primary.disabled = working || action.disabled;
-  cancel.hidden = !["available", "downloading", "verifying", "staged", "waiting_for_drain", "failed", "repair_required"].includes(delivery.state);
+  cancel.hidden = !["available", "downloading", "verifying", "staged", "waiting_for_drain", "reboot_required", "failed", "repair_required"].includes(delivery.state);
+  cancel.disabled = working;
   const hasProgress = delivery.total > 0 && delivery.downloaded >= 0;
   progress.hidden = !hasProgress;
   progressBar.style.width = hasProgress ? `${Math.min(100, Math.round((delivery.downloaded / delivery.total) * 100))}%` : "0";
@@ -1211,6 +1219,7 @@ function updateSummary(delivery: DeliverySnapshot, activeSessions: number): stri
     case "activating": return "正在激活";
     case "health_check": return "正在检查新版本";
     case "ready": return "更新完成";
+    case "reboot_required": return "Node.js 安装完成，请重启 Windows 后继续";
     case "repair_required": return "需要修复目标版本";
     case "failed": return "更新失败";
     default: return "尚未检查";
@@ -1221,6 +1230,7 @@ function updateAction(delivery: DeliverySnapshot, activeSessions: number): { lab
   switch (delivery.state) {
     case "available": return { label: "准备更新", icon: "download", disabled: false };
     case "repair_required": return { label: "重新准备", icon: "rotate-ccw", disabled: false };
+    case "reboot_required": return { label: "继续准备", icon: "rotate-ccw", disabled: false };
     case "staged":
     case "waiting_for_drain": return { label: activeSessions > 0 ? "会话运行中" : "重启并应用", icon: "rotate-ccw", disabled: activeSessions > 0 };
      case "failed": return delivery.target

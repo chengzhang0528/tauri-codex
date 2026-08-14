@@ -81,6 +81,7 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
   const broker = readFileSync(new URL("../app/src-tauri/src/delivery/broker.rs", import.meta.url), "utf8");
   const health = readFileSync(new URL("../app/src-tauri/src/delivery/health.rs", import.meta.url), "utf8");
   const ipc = readFileSync(new URL("../app/src-tauri/src/delivery/ipc.rs", import.meta.url), "utf8");
+  const launcher = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(health, /root\.join\("WebView2Loader\.dll"\)/);
   assert.match(health, /verify_authenticode_tree\(root\)/);
   assert.match(broker, /automatic_cycle\(&automatic\)/);
@@ -88,6 +89,10 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
   assert.match(broker, /job::background_command\(&manager\)/);
   assert.match(ipc, /PIPE_REJECT_REMOTE_CLIENTS/);
   assert.match(ipc, /D:P\(A;;GA;;;/);
+  assert.match(ipc, /acquire_instance/);
+  assert.ok(launcher.indexOf("acquire_launcher_instance") < launcher.indexOf("current_release_healthy"));
+  assert.match(broker, /_instance: ipc::InstanceGuard/);
+  assert.doesNotMatch(broker, /startup_bridge|read_bootstrap_remote_for_startup|manager_bridge_required/);
 });
 
 test("release workflow commits OSS before creating OSS-only GitHub Release Notes", () => {

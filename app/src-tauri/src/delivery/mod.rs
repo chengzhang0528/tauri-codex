@@ -11,6 +11,11 @@ pub use broker::{
     current_release_healthy, run_launcher_action, start_launcher_setup, LauncherState,
 };
 pub use contract::{CheckTrigger, DeliverySnapshot, UpdateIntent, UpdateResult, UpdateState};
+pub(crate) use ipc::InstanceGuard;
+
+pub(crate) fn acquire_launcher_instance() -> Result<Option<InstanceGuard>, String> {
+    ipc::acquire_instance()
+}
 
 pub fn manager_snapshot() -> Result<DeliverySnapshot, String> {
     match ipc::request(ipc::Request::GetSnapshot)? {
@@ -36,6 +41,9 @@ pub fn current_release_path(root: &std::path::Path) -> Result<Option<std::path::
     activation::current_release_path(root)
 }
 
-pub fn run_manager_broker(root: std::path::PathBuf) -> Result<(), String> {
-    broker::run_manager_broker(root)
+pub(crate) fn run_manager_broker(
+    root: std::path::PathBuf,
+    instance: InstanceGuard,
+) -> Result<(), String> {
+    broker::run_manager_broker(root, instance)
 }

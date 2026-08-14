@@ -1,4 +1,5 @@
 import { createHash, createHmac, createPublicKey, randomUUID, verify } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -39,6 +40,16 @@ function contentType(key) { return key.endsWith(".json") ? "application/json" : 
 function settings({ accessKeyId, accessKeySecret, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
   if (!accessKeyId || !accessKeySecret) throw new Error("ALIYUN_OSS_ACCESS_KEY_ID and ALIYUN_OSS_ACCESS_KEY_SECRET are required");
   return { accessKeyId, accessKeySecret, baseURL, bucket };
+}
+
+function frozenSourceCommit() {
+  const status = spawnSync("git", ["-C", workspaceRoot, "status", "--porcelain"], { encoding: "utf8", windowsHide: true });
+  if (status.error || status.status !== 0) throw new Error(`无法检查 Git worktree：${status.error?.message ?? status.stderr.trim()}`);
+  if (status.stdout.trim()) throw new Error("OSS 发布必须从 clean Git worktree 执行");
+  const head = spawnSync("git", ["-C", workspaceRoot, "rev-parse", "HEAD"], { encoding: "utf8", windowsHide: true });
+  const commit = head.stdout.trim();
+  if (head.error || head.status !== 0 || !/^[a-f0-9]{40}$/.test(commit)) throw new Error("无法固定 OSS 发布 source commit");
+  return commit;
 }
 
 async function responseBytes(response, label) {
@@ -115,6 +126,8 @@ function validateManifestPayload(manifest, candidate) {
     ids.add(component.id);
     const [kind, archive, installPath] = expected[component.id];
     if (!stableVersion.test(component.version) || component.kind !== kind || component.archive !== archive || component.installPath !== installPath || component.required !== true || component.provenance !== "authenticode+ed25519") throw new Error(`manifest ${component.id} 规则无效`);
+    if ((component.id === "manager" || component.id === "codex") && !digestPattern.test(component.installedTreeSha256)) throw new Error(`manifest ${component.id} 安装树 SHA-256 无效`);
+    if (component.id === "node" && component.installedTreeSha256 != null) throw new Error("manifest node 不得声明安装树 SHA-256");
     validateArtifact(component.artifact, `releases/${candidate.version}/windows-x64/components/`);
     if (component.artifact.provenance !== component.provenance) throw new Error(`manifest ${component.id} provenance 不一致`);
     if (component.id === "manager" && component.version !== candidate.version) throw new Error("manifest Manager version 与 release 不一致");
@@ -144,10 +157,11 @@ function validateBootstrapPayload(bootstrap, candidate) {
   if (bootstrap.release.manifest.objectKey !== `releases/${candidate.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
 }
 
-function loadCandidate(releaseRoot, trust) {
+function loadCandidate(releaseRoot, trust, expectedSourceCommit) {
   const candidateEnvelope = JSON.parse(readFileSync(path.join(releaseRoot, "candidate.json"), "utf8"));
   const candidate = verifySignedEnvelope(candidateEnvelope, trust, "candidate");
   if (candidate.product !== "tauri-codex" || candidate.platform !== "windows" || candidate.architecture !== "x86_64" || !stableVersion.test(candidate.version) || !stableVersion.test(candidate.installerVersion) || !/^[a-f0-9]{40}$/.test(candidate.sourceCommit) || candidate.bootstrap?.objectKey !== OSS_BOOTSTRAP_KEY || candidate.bootstrap?.provenance !== "ed25519") throw new Error("candidate identity 无效");
+  if (!/^[a-f0-9]{40}$/.test(expectedSourceCommit) || candidate.sourceCommit !== expectedSourceCommit) throw new Error("candidate source commit 与当前冻结源码不一致");
   const bootstrapBytes = localBytes(releaseRoot, candidate.bootstrap.localPath, "Bootstrap");
   if (bootstrapBytes.length !== candidate.bootstrap.size || sha256(bootstrapBytes) !== candidate.bootstrap.sha256) throw new Error("frozen Bootstrap bytes 已变化");
   const bootstrap = verifySignedEnvelope(JSON.parse(bootstrapBytes.toString("utf8")), trust, "Bootstrap");
@@ -200,8 +214,8 @@ export async function preflightPublisher({ accessKeyId, accessKeySecret, fetchIm
   return { admitted: true, key };
 }
 
-export async function stageRelease({ releaseRoot, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust);
+export async function stageRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
   for (const item of release.immutable) {
     if (item.bytes) await putObject(fetchImpl, config, item.artifact.objectKey, item.bytes, true);
     await verifyObject(fetchImpl, config, item.artifact, item.role);
@@ -209,8 +223,8 @@ export async function stageRelease({ releaseRoot, accessKeyId, accessKeySecret, 
   return { staged: true, release: release.candidate.version, objects: release.immutable.map((item) => item.artifact.objectKey) };
 }
 
-export async function commitRelease({ releaseRoot, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust);
+export async function commitRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
   const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
   const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
@@ -242,7 +256,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const [mode, version] = process.argv.slice(2); const appVersion = JSON.parse(readFileSync(path.join(workspaceRoot, "app", "package.json"), "utf8")).version;
   try {
     if (!stableVersion.test(version) || version !== appVersion) throw new Error("version must match app/package.json");
-    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET, releaseKeyId: process.env.TAURI_CODEX_RELEASE_KEY_ID, releasePublicKey: process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY };
+    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : frozenSourceCommit(), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET, releaseKeyId: process.env.TAURI_CODEX_RELEASE_KEY_ID, releasePublicKey: process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY };
     const result = mode === "preflight" ? await preflightPublisher(common) : mode === "stage" ? await stageRelease(common) : mode === "commit" ? await commitRelease(common) : null;
     if (!result) throw new Error("usage: publish:release:oss -- <preflight|stage|commit> <version>");
     console.log(JSON.stringify(result, null, 2));

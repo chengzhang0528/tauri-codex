@@ -16,12 +16,24 @@ const MAX_UNPACKED_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_UNPACKED_ENTRIES: usize = 100_000;
 const MAX_UNPACKED_DEPTH: usize = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageReleaseOutcome {
+    Staged,
+    RebootRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeInstallOutcome {
+    Ready,
+    RebootRequired,
+}
+
 pub fn stage_release(
     root: &Path,
     manifest: &Manifest,
     progress: &mut dyn FnMut(&str, &str, u64, u64),
     cancelled: &dyn Fn() -> bool,
-) -> Result<PathBuf, String> {
+) -> Result<StageReleaseOutcome, String> {
     ensure_not_cancelled(cancelled)?;
     let version = &manifest.payload.version;
     let staging = root.join("releases").join(format!("staging-{version}"));
@@ -33,7 +45,7 @@ pub fn stage_release(
             == Some(manifest)
     {
         if verify_staged_release(root, manifest).is_ok() {
-            return Ok(staging);
+            return Ok(StageReleaseOutcome::Staged);
         }
         fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
     }
@@ -41,7 +53,7 @@ pub fn stage_release(
         fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
     }
     fs::create_dir_all(&staging).map_err(|error| error.to_string())?;
-    let result = (|| -> Result<PathBuf, String> {
+    let result = (|| -> Result<StageReleaseOutcome, String> {
         let cache = root.join("components");
         fs::create_dir_all(&cache).map_err(|error| error.to_string())?;
         let node = required(manifest, ComponentId::Node)?;
@@ -58,8 +70,12 @@ pub fn stage_release(
                 ensure_not_cancelled(cancelled)?;
                 progress("正在安装系统组件", "Node.js", 0, 0);
                 ensure_not_cancelled(cancelled)?;
-                install_node(&asset)?;
-                health::doctor_system_node(&node.version)?
+                match install_node(&asset)? {
+                    NodeInstallOutcome::Ready => health::doctor_system_node(&node.version)?,
+                    NodeInstallOutcome::RebootRequired => {
+                        return Ok(StageReleaseOutcome::RebootRequired)
+                    }
+                }
             }
         };
         for id in [ComponentId::Manager, ComponentId::Codex] {
@@ -72,6 +88,7 @@ pub fn stage_release(
             fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
             progress("正在安全解包", label, 0, 0);
             unpack_zip(&asset, &destination, cancelled)?;
+            verify_component_tree(component, &destination)?;
         }
         progress("正在检查组件", "Manager", 0, 0);
         ensure_not_cancelled(cancelled)?;
@@ -85,7 +102,7 @@ pub fn stage_release(
         )
         .map_err(|error| error.to_string())?;
         fs::write(staging.join(".ready"), b"ready\n").map_err(|error| error.to_string())?;
-        Ok(staging.clone())
+        Ok(StageReleaseOutcome::Staged)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
@@ -97,20 +114,15 @@ pub fn verify_staged_release(root: &Path, manifest: &Manifest) -> Result<(), Str
     let release = root
         .join("releases")
         .join(format!("staging-{}", manifest.payload.version));
-    verify_release(root, manifest, &release, "staged")
+    verify_release(manifest, &release, "staged")
 }
 
 pub fn verify_installed_release(root: &Path, manifest: &Manifest) -> Result<(), String> {
     let release = root.join("releases").join(&manifest.payload.version);
-    verify_release(root, manifest, &release, "installed")
+    verify_release(manifest, &release, "installed")
 }
 
-fn verify_release(
-    root: &Path,
-    manifest: &Manifest,
-    release: &Path,
-    state: &str,
-) -> Result<(), String> {
+fn verify_release(manifest: &Manifest, release: &Path, state: &str) -> Result<(), String> {
     let stored: Manifest = serde_json::from_slice(
         &fs::read(release.join("release.json")).map_err(|error| error.to_string())?,
     )
@@ -119,24 +131,9 @@ fn verify_release(
     if stored != *manifest || !release.join(".ready").is_file() {
         return Err(format!("{state} release manifest 或 ready 标记不匹配"));
     }
-    let cache = root.join("components");
     for id in [ComponentId::Manager, ComponentId::Codex] {
         let component = required(manifest, id.clone())?;
-        let archive = cache.join(format!("{}.zip", component.artifact.sha256));
-        verify_cached_artifact(&archive, &component.artifact)?;
-        let verify_root = root.join(format!(
-            ".verify-{}-{}-{}",
-            manifest.payload.version,
-            id.as_str(),
-            uuid::Uuid::new_v4().simple()
-        ));
-        fs::create_dir_all(&verify_root).map_err(|error| error.to_string())?;
-        let result = (|| -> Result<(), String> {
-            unpack_zip(&archive, &verify_root, &|| false)?;
-            compare_tree(&verify_root, &release.join(&component.install_path))
-        })();
-        let _ = fs::remove_dir_all(&verify_root);
-        result?;
+        verify_component_tree(component, &release.join(&component.install_path))?;
     }
     let node = required(manifest, ComponentId::Node)?;
     health::doctor_system_node(&node.version)?;
@@ -352,65 +349,92 @@ fn verify_cached_artifact(path: &Path, artifact: &Artifact) -> Result<(), String
     Ok(())
 }
 
-fn compare_tree(expected: &Path, actual: &Path) -> Result<(), String> {
-    let mut expected_entries = 0usize;
-    let mut actual_entries = 0usize;
-    compare_tree_inner(expected, actual, &mut expected_entries, &mut actual_entries)
+fn verify_component_tree(component: &Component, root: &Path) -> Result<(), String> {
+    let expected = component
+        .installed_tree_sha256
+        .as_deref()
+        .ok_or_else(|| format!("{} 缺少安装树 SHA-256", component.id.as_str()))?;
+    let actual = installed_tree_sha256(root)?;
+    if actual != expected {
+        return Err(format!("{} 安装树 SHA-256 不匹配", component.id.as_str()));
+    }
+    Ok(())
 }
 
-fn compare_tree_inner(
-    expected: &Path,
-    actual: &Path,
-    expected_total: &mut usize,
-    actual_total: &mut usize,
+fn installed_tree_sha256(root: &Path) -> Result<String, String> {
+    if !root.is_dir() {
+        return Err(format!("组件安装目录缺失：{}", root.display()));
+    }
+    let mut files = Vec::new();
+    let mut entries = 0usize;
+    let mut total_bytes = 0u64;
+    collect_tree_files(root, root, 0, &mut entries, &mut total_bytes, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in files.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(format!("组件安装树包含大小写冲突路径：{}", pair[0].0));
+        }
+    }
+    let mut tree = sha2::Sha256::new();
+    for (relative, path, size) in files {
+        tree.update(relative.as_bytes());
+        tree.update([0]);
+        tree.update(size.to_string().as_bytes());
+        tree.update([0]);
+        tree.update(sha256_file(&path)?.as_bytes());
+        tree.update(b"\n");
+    }
+    Ok(format!("{:x}", tree.finalize()))
+}
+
+fn collect_tree_files(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    entries: &mut usize,
+    total_bytes: &mut u64,
+    files: &mut Vec<(String, PathBuf, u64)>,
 ) -> Result<(), String> {
-    if !expected.is_dir() || !actual.is_dir() {
-        return Err(format!(
-            "组件安装目录缺失：{} / {}",
-            expected.display(),
-            actual.display()
-        ));
+    if depth > MAX_UNPACKED_DEPTH {
+        return Err("组件安装树目录深度超过上限".to_string());
     }
-    let mut expected_in_directory = 0usize;
-    for entry in fs::read_dir(expected).map_err(|error| error.to_string())? {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
-        expected_in_directory += 1;
-        *expected_total = expected_total
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        *entries = entries
             .checked_add(1)
-            .ok_or_else(|| "组件目录条目数量溢出".to_string())?;
-        if *expected_total > MAX_UNPACKED_ENTRIES {
-            return Err("组件目录条目数量超过上限".to_string());
+            .ok_or_else(|| "组件安装树条目数量溢出".to_string())?;
+        if *entries > MAX_UNPACKED_ENTRIES {
+            return Err("组件安装树条目数量超过上限".to_string());
         }
-        let name = entry.file_name();
-        let left = expected.join(&name);
-        let right = actual.join(&name);
-        let left_type = fs::symlink_metadata(&left).map_err(|error| error.to_string())?;
-        let right_type = fs::symlink_metadata(&right).map_err(|error| error.to_string())?;
-        if left_type.file_type().is_symlink() || right_type.file_type().is_symlink() {
-            return Err(format!("组件目录不允许符号链接：{}", right.display()));
+        if metadata.file_type().is_symlink() {
+            return Err(format!("组件安装树不允许符号链接：{}", path.display()));
         }
-        if left_type.is_dir() != right_type.is_dir() {
-            return Err(format!("组件目录类型不匹配：{}", right.display()));
+        if metadata.is_dir() {
+            collect_tree_files(root, &path, depth + 1, entries, total_bytes, files)?;
+            continue;
         }
-        if left_type.is_dir() {
-            compare_tree_inner(&left, &right, expected_total, actual_total)?;
-        } else if !files_equal(&left, &right)? {
-            return Err(format!("组件文件内容不匹配：{}", right.display()));
+        if !metadata.is_file() {
+            return Err(format!("组件安装树包含特殊文件：{}", path.display()));
         }
-    }
-    let mut actual_in_directory = 0usize;
-    for entry in fs::read_dir(actual).map_err(|error| error.to_string())? {
-        entry.map_err(|error| error.to_string())?;
-        actual_in_directory += 1;
-        *actual_total = actual_total
-            .checked_add(1)
-            .ok_or_else(|| "组件安装目录条目数量溢出".to_string())?;
-        if *actual_total > MAX_UNPACKED_ENTRIES {
-            return Err("组件安装目录条目数量超过上限".to_string());
+        if metadata.len() > MAX_UNPACKED_FILE_BYTES {
+            return Err("组件安装树单文件大小超过上限".to_string());
         }
-    }
-    if expected_in_directory != actual_in_directory {
-        return Err(format!("组件解包内容不匹配：{}", actual.display()));
+        *total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| "组件安装树总大小溢出".to_string())?;
+        if *total_bytes > MAX_UNPACKED_BYTES {
+            return Err("组件安装树总大小超过上限".to_string());
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/");
+        files.push((relative, path, metadata.len()));
     }
     Ok(())
 }
@@ -429,34 +453,6 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
-    if fs::metadata(left).map_err(|error| error.to_string())?.len()
-        != fs::metadata(right)
-            .map_err(|error| error.to_string())?
-            .len()
-    {
-        return Ok(false);
-    }
-    let mut left = File::open(left).map_err(|error| error.to_string())?;
-    let mut right = File::open(right).map_err(|error| error.to_string())?;
-    let mut left_buffer = [0_u8; 64 * 1024];
-    let mut right_buffer = [0_u8; 64 * 1024];
-    loop {
-        let left_read = left
-            .read(&mut left_buffer)
-            .map_err(|error| error.to_string())?;
-        let right_read = right
-            .read(&mut right_buffer)
-            .map_err(|error| error.to_string())?;
-        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-            return Ok(false);
-        }
-        if left_read == 0 {
-            return Ok(true);
-        }
-    }
-}
-
 fn ensure_not_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     if cancelled() {
         Err("更新准备已取消".to_string())
@@ -465,24 +461,30 @@ fn ensure_not_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     }
 }
 
-fn install_node(installer: &Path) -> Result<(), String> {
+fn install_node(installer: &Path) -> Result<NodeInstallOutcome, String> {
     let status = job::background_command("msiexec.exe")
         .args(["/i", &installer.to_string_lossy(), "/passive", "/norestart"])
         .status()
         .map_err(|error| format!("无法运行 Node.js 安装程序：{error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Node.js 安装程序退出码 {}",
-            status.code().unwrap_or(-1)
-        ))
+    classify_node_installer_exit(status.code())
+}
+
+fn classify_node_installer_exit(code: Option<i32>) -> Result<NodeInstallOutcome, String> {
+    match code {
+        Some(0) => Ok(NodeInstallOutcome::Ready),
+        Some(3010) => Ok(NodeInstallOutcome::RebootRequired),
+        Some(code) => Err(format!("Node.js 安装程序退出码 {code}")),
+        None => Err("Node.js 安装程序被终止".to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_archive_path;
+    use super::{
+        classify_node_installer_exit, installed_tree_sha256, validate_archive_path,
+        NodeInstallOutcome,
+    };
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -494,5 +496,42 @@ mod tests {
         assert!(validate_archive_path(Path::new("manager/data:stream")).is_err());
         assert!(validate_archive_path(Path::new("manager/CON.txt")).is_err());
         assert!(validate_archive_path(Path::new("manager/file. ")).is_err());
+    }
+
+    #[test]
+    fn installed_tree_digest_is_stable_and_content_sensitive() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-tree-digest-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(root.join("Bin")).unwrap();
+        fs::write(root.join("Bin/app.exe"), b"app").unwrap();
+        fs::write(root.join("readme.txt"), b"docs").unwrap();
+        assert_eq!(
+            installed_tree_sha256(&root).unwrap(),
+            "7df47593086e0fceca3c8194935fee043384498c3ec6f31d86aebdf599eae4db"
+        );
+        assert_eq!(
+            installed_tree_sha256(&root).unwrap(),
+            installed_tree_sha256(&root).unwrap()
+        );
+        let before = installed_tree_sha256(&root).unwrap();
+        fs::write(root.join("readme.txt"), b"changed").unwrap();
+        assert_ne!(before, installed_tree_sha256(&root).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn node_installer_exit_3010_requires_reboot_without_failing() {
+        assert_eq!(
+            classify_node_installer_exit(Some(0)).unwrap(),
+            NodeInstallOutcome::Ready
+        );
+        assert_eq!(
+            classify_node_installer_exit(Some(3010)).unwrap(),
+            NodeInstallOutcome::RebootRequired
+        );
+        assert!(classify_node_installer_exit(Some(1603)).is_err());
+        assert!(classify_node_installer_exit(None).is_err());
     }
 }

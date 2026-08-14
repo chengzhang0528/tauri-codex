@@ -76,17 +76,44 @@ pub fn load(root: &Path) -> Result<Transaction, String> {
 
 pub fn save(root: &Path, transaction: &Transaction) -> Result<(), String> {
     let path = transaction_path(root);
-    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(transaction).map_err(|error| error.to_string())?,
+    paths::write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(transaction).map_err(|error| error.to_string())?,
     )
-    .map_err(|error| error.to_string())?;
-    let result = paths::atomic_replace(&temporary, &path).map_err(|error| error.to_string());
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    .map_err(|error| error.to_string())
+}
+
+pub fn commit(root: &Path, current: &mut Transaction, next: Transaction) -> Result<(), String> {
+    save(root, &next)?;
+    *current = next;
+    Ok(())
+}
+
+pub fn commit_background(
+    root: &Path,
+    current: &mut Transaction,
+    mut next: Transaction,
+) -> Result<(), String> {
+    match save(root, &next) {
+        Ok(()) => {
+            *current = next;
+            Ok(())
+        }
+        Err(error) => {
+            let message = format!("交付事务持久化失败：{error}");
+            finish(
+                &mut next,
+                UpdateState::Failed,
+                "persistence-failed",
+                Some(message.clone()),
+            );
+            if let Err(retry) = save(root, &next) {
+                next.error = Some(format!("{message}；失败状态持久化也失败：{retry}"));
+            }
+            *current = next;
+            Err(message)
+        }
     }
-    result
 }
 
 pub fn recover(
@@ -156,24 +183,28 @@ pub fn record_ready(root: &Path, target: UpdateTarget) -> Result<(), String> {
     save(root, &transaction)
 }
 
-pub fn snapshot(root: &Path, active_sessions: usize) -> Result<DeliverySnapshot, String> {
-    let transaction = load(root)?;
+pub fn snapshot(
+    root: &Path,
+    transaction: &Transaction,
+    active_sessions: usize,
+) -> Result<DeliverySnapshot, String> {
     let current_version = activation::current_release_version(root)?;
     let (codex, node) = activation::current_component_versions(root)?;
     Ok(DeliverySnapshot {
-        state: transaction.state,
-        target: transaction.target,
+        state: transaction.state.clone(),
+        target: transaction.target.clone(),
         current_version,
         current_codex_version: codex,
         current_node_version: node,
         active_sessions,
-        phase: transaction.phase,
-        component: transaction.component,
+        phase: transaction.phase.clone(),
+        component: transaction.component.clone(),
         downloaded: transaction.downloaded,
         total: transaction.total,
-        error: transaction.error,
+        error: transaction.error.clone(),
         checked_at: transaction.checked_at,
-        operation_id: (!transaction.operation_id.is_empty()).then_some(transaction.operation_id),
+        operation_id: (!transaction.operation_id.is_empty())
+            .then_some(transaction.operation_id.clone()),
     })
 }
 
@@ -218,7 +249,10 @@ pub fn finish(
 
 #[cfg(test)]
 mod tests {
-    use super::{begin, load, recover, save, CheckTrigger, UpdateState, UpdateTarget};
+    use super::{
+        begin, commit, commit_background, load, recover, save, transaction_path, CheckTrigger,
+        Transaction, UpdateState, UpdateTarget,
+    };
     use std::fs;
 
     fn fixture() -> std::path::PathBuf {
@@ -281,6 +315,37 @@ mod tests {
 
         assert_eq!(recovered.state, UpdateState::RepairRequired);
         assert_eq!(recovered.phase, "repair-required");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_persistence_does_not_advance_synchronous_state() {
+        let root = fixture();
+        fs::create_dir(transaction_path(&root)).unwrap();
+        let mut current = Transaction::default();
+        let next = begin(
+            CheckTrigger::Manual,
+            None,
+            UpdateState::Checking,
+            "checking",
+        );
+
+        assert!(commit(&root, &mut current, next).is_err());
+        assert_eq!(current.state, UpdateState::Idle);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_persistence_failure_is_observable_in_memory() {
+        let root = fixture();
+        fs::create_dir(transaction_path(&root)).unwrap();
+        let mut current = Transaction::default();
+        let mut next = current.clone();
+        next.state = UpdateState::Staged;
+
+        assert!(commit_background(&root, &mut current, next).is_err());
+        assert_eq!(current.state, UpdateState::Failed);
+        assert_eq!(current.phase, "persistence-failed");
         fs::remove_dir_all(root).unwrap();
     }
 }

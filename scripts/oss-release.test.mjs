@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { signEnvelope } from "./windows-pipeline.mjs";
+import { installedTreeSha256, signEnvelope } from "./windows-pipeline.mjs";
 import {
   commitRelease,
   compareVersions,
@@ -61,9 +61,9 @@ function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
     product: "tauri-codex", version, platform: "windows", architecture: "x86_64",
     minimumLauncherVersion: installerVersion, minimumManagerVersion: version,
     components: [
-      { id: "manager", version, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: records.manager.provenance, artifact: records.manager },
-      { id: "codex", version: "0.147.0", kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: records.codex.provenance, artifact: records.codex },
-      { id: "node", version: "24.19.0", kind: "system", archive: "msi", required: true, installPath: "system", provenance: records.node.provenance, artifact: records.node },
+      { id: "manager", version, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: records.manager.provenance, installedTreeSha256: digest(Buffer.from(`manager-tree-${version}`)), artifact: records.manager },
+      { id: "codex", version: "0.147.0", kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: records.codex.provenance, installedTreeSha256: digest(Buffer.from("codex-tree-0.147.0")), artifact: records.codex },
+      { id: "node", version: "24.19.0", kind: "system", archive: "msi", required: true, installPath: "system", provenance: records.node.provenance, installedTreeSha256: null, artifact: records.node },
     ],
   };
   const manifestBytes = jsonBytes(signEnvelope(manifestPayload, trust));
@@ -129,7 +129,7 @@ function fakeFetch(options = {}) {
 }
 
 function publishOptions(release, remote) {
-  return { releaseRoot: release.root, accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, ...publisherTrust };
+  return { releaseRoot: release.root, expectedSourceCommit: "a".repeat(40), accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, ...publisherTrust };
 }
 
 test("validates object keys, versions, and OSS signatures", () => {
@@ -137,6 +137,18 @@ test("validates object keys, versions, and OSS signatures", () => {
   assert.equal(safeObjectKey("releases/0.2.0/../secret"), false);
   assert.equal(compareVersions("0.2.0", "0.1.9"), 1);
   assert.match(ossAuthorization({ method: "PUT", contentType: "application/json", date: "Thu, 13 Aug 2026 00:00:00 GMT", key: OSS_BOOTSTRAP_KEY, secret: "secret", accessKeyId: "id" }), /^OSS id:/);
+});
+
+test("build and runtime share the fixed installed-tree digest format", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-tree-v2-"));
+  try {
+    mkdirSync(path.join(root, "Bin"));
+    writeFileSync(path.join(root, "Bin", "app.exe"), "app");
+    writeFileSync(path.join(root, "readme.txt"), "docs");
+    assert.equal(installedTreeSha256(root), "7df47593086e0fceca3c8194935fee043384498c3ec6f31d86aebdf599eae4db");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("publisher admission proves public readback and removes its exact probe", async () => {
@@ -243,6 +255,20 @@ test("candidate signature and frozen bytes reject mutation", async () => {
     writeFileSync(candidatePath, jsonBytes(signEnvelope(release.candidatePayload, trust)));
     writeFileSync(path.join(release.root, "components", path.basename(release.records.manager.objectKey)), "mutated");
     await assert.rejects(() => stageRelease(publishOptions(release, remote)), /bytes/);
+  } finally {
+    rmSync(release.root, { recursive: true, force: true });
+  }
+});
+
+test("publisher rejects a candidate from a different source commit", async () => {
+  const release = fixture();
+  const remote = fakeFetch();
+  try {
+    await assert.rejects(
+      () => stageRelease({ ...publishOptions(release, remote), expectedSourceCommit: "b".repeat(40) }),
+      /source commit/,
+    );
+    assert.equal(remote.events.length, 0);
   } finally {
     rmSync(release.root, { recursive: true, force: true });
   }

@@ -70,25 +70,6 @@ pub fn current_component_versions(root: &Path) -> Result<(Option<String>, Option
     Ok((codex, node))
 }
 
-pub fn current_manager_version(root: &Path) -> Result<Option<String>, String> {
-    let Some(path) = current_release_path(root)? else {
-        return Ok(None);
-    };
-    let manifest: Manifest = serde_json::from_slice(
-        &fs::read(path.join("release.json")).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    super::contract::verify_envelope(&manifest)?;
-    Ok(manifest
-        .payload
-        .components
-        .iter()
-        .find(|component| {
-            component.id == super::contract::ComponentId::Manager && component.required
-        })
-        .map(|component| component.version.clone()))
-}
-
 pub fn commit_staged(root: &Path, target: &UpdateTarget) -> Result<(), String> {
     let version = match target {
         UpdateTarget::Release { version } => version,
@@ -530,17 +511,11 @@ fn journal_path(root: &Path) -> PathBuf {
 
 fn write_journal(root: &Path, journal: &ActivationJournal) -> Result<(), String> {
     let path = journal_path(root);
-    let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?,
+    paths::write_atomic(
+        &path,
+        &serde_json::to_vec_pretty(journal).map_err(|error| error.to_string())?,
     )
-    .map_err(|error| error.to_string())?;
-    let result = paths::atomic_replace(&temporary, &path).map_err(|error| error.to_string());
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    .map_err(|error| error.to_string())
 }
 
 fn clear_journal(root: &Path) -> Result<(), String> {
@@ -555,17 +530,11 @@ fn write_current(root: &Path, state: &CurrentState) -> Result<(), String> {
     let releases = root.join("releases");
     fs::create_dir_all(&releases).map_err(|error| error.to_string())?;
     let target = releases.join("current.json");
-    let temporary = releases.join(format!(".current-{}.tmp", std::process::id()));
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?,
+    paths::write_atomic(
+        &target,
+        &serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?,
     )
-    .map_err(|error| error.to_string())?;
-    let result = paths::atomic_replace(&temporary, &target).map_err(|error| error.to_string());
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    .map_err(|error| error.to_string())
 }
 
 fn remove_current(root: &Path) -> Result<(), String> {

@@ -4,7 +4,53 @@ use std::io::{Read, Write};
 use std::sync::{mpsc::Sender, Arc};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\tauri-codex-delivery-v2";
+#[cfg(windows)]
+const INSTANCE_MUTEX_NAME: &str = r"Local\tauri-codex-launcher-broker-v2";
 const MAX_MESSAGE: usize = 1024 * 1024;
+
+#[cfg(windows)]
+pub struct InstanceGuard(windows::Win32::Foundation::HANDLE);
+
+#[cfg(not(windows))]
+pub struct InstanceGuard;
+
+#[cfg(windows)]
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::Foundation::CloseHandle(self.0).ok();
+        }
+    }
+}
+
+pub fn acquire_instance() -> Result<Option<InstanceGuard>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{
+            CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, WIN32_ERROR,
+        };
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        let name = std::ffi::OsStr::new(INSTANCE_MUTEX_NAME)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        unsafe { SetLastError(WIN32_ERROR(0)) };
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+            .map_err(|error| format!("创建 Launcher Broker 单实例互斥量失败：{error}"))?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle).ok() };
+            return Ok(None);
+        }
+        Ok(Some(InstanceGuard(handle)))
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Launcher Broker 单实例只支持 Windows".to_string())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +81,18 @@ pub fn serve_with_ready(
         let error = "Launcher Broker 只支持 Windows Named Pipe".to_string();
         let _ = ready.send(Err(error.clone()));
         Err(error)
+    }
+}
+
+pub fn serve(handler: Arc<dyn Fn(Request) -> Response + Send + Sync>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        serve_windows(handler, None)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handler;
+        Err("Launcher Broker 只支持 Windows Named Pipe".to_string())
     }
 }
 

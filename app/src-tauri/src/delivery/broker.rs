@@ -98,7 +98,19 @@ impl Broker {
             .inner
             .lock()
             .map_err(|_| "Broker 状态锁已损坏".to_string())?;
-        transaction::snapshot(&self.root, inner.active_sessions)
+        transaction::snapshot(&self.root, &inner.transaction, inner.active_sessions)
+    }
+
+    fn commit_transaction(&self, inner: &mut BrokerInner, next: Transaction) -> Result<(), String> {
+        transaction::commit(&self.root, &mut inner.transaction, next)
+    }
+
+    fn commit_background_transaction(
+        &self,
+        inner: &mut BrokerInner,
+        next: Transaction,
+    ) -> Result<(), String> {
+        transaction::commit_background(&self.root, &mut inner.transaction, next)
     }
 
     pub fn handle(self: &Arc<Self>, intent: UpdateIntent) -> Result<DeliverySnapshot, String> {
@@ -124,13 +136,14 @@ impl Broker {
                 | UpdateState::WaitingForDrain
                 | UpdateState::Activating
                 | UpdateState::HealthCheck
+                | UpdateState::RebootRequired
                 | UpdateState::RepairRequired
         ) {
-            return transaction::snapshot(&self.root, inner.active_sessions);
+            return transaction::snapshot(&self.root, &inner.transaction, inner.active_sessions);
         }
-        inner.transaction = transaction::begin(trigger, None, UpdateState::Checking, "checking");
-        transaction::save(&self.root, &inner.transaction)?;
-        let operation_id = inner.transaction.operation_id.clone();
+        let next = transaction::begin(trigger, None, UpdateState::Checking, "checking");
+        let operation_id = next.operation_id.clone();
+        self.commit_transaction(&mut inner, next)?;
         drop(inner);
         let result = self.resolve_target();
         let mut inner = self
@@ -138,37 +151,33 @@ impl Broker {
             .lock()
             .map_err(|_| "Broker 状态锁已损坏".to_string())?;
         if inner.transaction.operation_id != operation_id {
-            return transaction::snapshot(&self.root, inner.active_sessions);
+            return transaction::snapshot(&self.root, &inner.transaction, inner.active_sessions);
         }
+        let mut next = inner.transaction.clone();
         match result {
             Ok((target, identity)) => {
-                inner.transaction.target = target.clone();
-                inner.transaction.target_identity = identity;
-                inner.transaction.state = if target.is_some() {
+                next.target = target.clone();
+                next.target_identity = identity;
+                next.state = if target.is_some() {
                     UpdateState::Available
                 } else {
                     UpdateState::UpToDate
                 };
-                inner.transaction.phase = if target.is_some() {
+                next.phase = if target.is_some() {
                     "available"
                 } else {
                     "up-to-date"
                 }
                 .to_string();
-                inner.transaction.checked_at = Some(now());
-                inner.transaction.error = None;
+                next.checked_at = Some(now());
+                next.error = None;
             }
             Err(error) => {
-                transaction::finish(
-                    &mut inner.transaction,
-                    UpdateState::Failed,
-                    "check",
-                    Some(error),
-                );
+                transaction::finish(&mut next, UpdateState::Failed, "check", Some(error));
             }
         }
-        transaction::save(&self.root, &inner.transaction)?;
-        transaction::snapshot(&self.root, inner.active_sessions)
+        self.commit_background_transaction(&mut inner, next)?;
+        transaction::snapshot(&self.root, &inner.transaction, inner.active_sessions)
     }
 
     fn prepare(self: &Arc<Self>) -> Result<DeliverySnapshot, String> {
@@ -179,9 +188,16 @@ impl Broker {
                 .map_err(|_| "Broker 状态锁已损坏".to_string())?;
             if !matches!(
                 inner.transaction.state,
-                UpdateState::Available | UpdateState::Failed | UpdateState::RepairRequired
+                UpdateState::Available
+                    | UpdateState::Failed
+                    | UpdateState::RebootRequired
+                    | UpdateState::RepairRequired
             ) {
-                return transaction::snapshot(&self.root, inner.active_sessions);
+                return transaction::snapshot(
+                    &self.root,
+                    &inner.transaction,
+                    inner.active_sessions,
+                );
             }
             let target = inner
                 .transaction
@@ -189,26 +205,26 @@ impl Broker {
                 .clone()
                 .ok_or_else(|| "没有可准备的兼容更新".to_string())?;
             let target_identity = inner.transaction.target_identity.clone();
-            inner.transaction = transaction::begin(
+            let mut next = transaction::begin(
                 inner.transaction.trigger.clone(),
                 Some(target.clone()),
                 UpdateState::Downloading,
                 "downloading",
             );
-            inner.transaction.target_identity = target_identity.clone();
-            transaction::save(&self.root, &inner.transaction)?;
-            (
-                target,
-                target_identity,
-                inner.transaction.operation_id.clone(),
-                inner.active_sessions,
-            )
+            next.target_identity = target_identity.clone();
+            let operation_id = next.operation_id.clone();
+            self.commit_transaction(&mut inner, next)?;
+            (target, target_identity, operation_id, inner.active_sessions)
         };
         self.cancel_requested.store(false, Ordering::SeqCst);
         self.cancel_allowed.store(true, Ordering::SeqCst);
         let worker = self.clone();
         thread::spawn(move || worker.run_prepare(operation_id, target, target_identity));
-        transaction::snapshot(&self.root, active_sessions)
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Broker 状态锁已损坏".to_string())?;
+        transaction::snapshot(&self.root, &inner.transaction, active_sessions)
     }
 
     fn run_prepare(
@@ -223,20 +239,39 @@ impl Broker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let progress_owner = self.clone();
         let progress_id = operation_id.clone();
+        let progress_failure = Arc::new(Mutex::new(None::<String>));
+        let progress_failure_writer = progress_failure.clone();
         let mut progress = move |phase: &str, component: &str, downloaded: u64, total: u64| {
-            let _ =
-                progress_owner.update_progress(&progress_id, phase, component, downloaded, total);
+            if let Err(error) =
+                progress_owner.update_progress(&progress_id, phase, component, downloaded, total)
+            {
+                if let Ok(mut failure) = progress_failure_writer.lock() {
+                    *failure = Some(format!("无法持久化更新进度：{error}"));
+                }
+            }
         };
+        let progress_failure_reader = progress_failure.clone();
         let cancelled = || {
             self.cancel_requested.load(Ordering::SeqCst)
+                || progress_failure_reader
+                    .lock()
+                    .map(|failure| failure.is_some())
+                    .unwrap_or(true)
                 || self
                     .inner
                     .lock()
                     .map(|inner| inner.transaction.operation_id != operation_id)
                     .unwrap_or(true)
         };
-        let result =
+        let mut result =
             self.prepare_target(&target, target_identity.as_ref(), &mut progress, &cancelled);
+        if let Some(error) = progress_failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone())
+        {
+            result = Err(error);
+        }
         let mut inner = self
             .inner
             .lock()
@@ -244,22 +279,23 @@ impl Broker {
         if inner.transaction.operation_id != operation_id {
             return;
         }
+        let mut next = inner.transaction.clone();
         match result {
-            Ok(()) => {
-                inner.transaction.state = UpdateState::Staged;
-                inner.transaction.phase = "staged".to_string();
-                inner.transaction.error = None;
+            Ok(component::StageReleaseOutcome::Staged) => {
+                next.state = UpdateState::Staged;
+                next.phase = "staged".to_string();
+                next.error = None;
+            }
+            Ok(component::StageReleaseOutcome::RebootRequired) => {
+                next.state = UpdateState::RebootRequired;
+                next.phase = "reboot-required".to_string();
+                next.error = Some("Node.js 安装完成，请重启 Windows 后继续".to_string());
             }
             Err(error) => {
-                transaction::finish(
-                    &mut inner.transaction,
-                    UpdateState::Failed,
-                    "prepare",
-                    Some(error),
-                );
+                transaction::finish(&mut next, UpdateState::Failed, "prepare", Some(error));
             }
         }
-        let _ = transaction::save(&self.root, &inner.transaction);
+        let _ = self.commit_background_transaction(&mut inner, next);
         self.cancel_allowed.store(true, Ordering::SeqCst);
     }
 
@@ -278,18 +314,20 @@ impl Broker {
         if inner.transaction.operation_id != operation_id {
             return Ok(());
         }
-        inner.transaction.state = if phase.contains("下载") {
+        let mut next = inner.transaction.clone();
+        next.state = if phase.contains("下载") {
             UpdateState::Downloading
         } else {
             UpdateState::Verifying
         };
-        inner.transaction.phase = phase.to_string();
-        inner.transaction.component = component.to_string();
-        inner.transaction.downloaded = downloaded;
-        inner.transaction.total = total;
+        next.phase = phase.to_string();
+        next.component = component.to_string();
+        next.downloaded = downloaded;
+        next.total = total;
+        self.commit_transaction(&mut inner, next)?;
         self.cancel_allowed
             .store(phase != "正在安装系统组件", Ordering::SeqCst);
-        transaction::save(&self.root, &inner.transaction)
+        Ok(())
     }
 
     fn activate(&self, active_sessions: usize) -> Result<DeliverySnapshot, String> {
@@ -303,13 +341,14 @@ impl Broker {
         ) {
             return Err("更新尚未进入 staged".to_string());
         }
-        inner.active_sessions = active_sessions;
         if active_sessions != 0 {
-            inner.transaction.state = UpdateState::WaitingForDrain;
-            inner.transaction.phase = "waiting-for-drain".to_string();
-            inner.transaction.error = Some(format!("仍有 {active_sessions} 个活动会话"));
-            transaction::save(&self.root, &inner.transaction)?;
-            return transaction::snapshot(&self.root, active_sessions);
+            let mut next = inner.transaction.clone();
+            next.state = UpdateState::WaitingForDrain;
+            next.phase = "waiting-for-drain".to_string();
+            next.error = Some(format!("仍有 {active_sessions} 个活动会话"));
+            self.commit_transaction(&mut inner, next)?;
+            inner.active_sessions = active_sessions;
+            return transaction::snapshot(&self.root, &inner.transaction, active_sessions);
         }
         let operation_id = inner.transaction.operation_id.clone();
         let target = inner
@@ -332,11 +371,13 @@ impl Broker {
         {
             return Err("更新事务在激活前已发生变化，请重新检查".to_string());
         }
-        inner.transaction.state = UpdateState::Activating;
-        inner.transaction.phase = "activating".to_string();
-        inner.transaction.error = None;
-        transaction::save(&self.root, &inner.transaction)?;
-        let snapshot = transaction::snapshot(&self.root, active_sessions)?;
+        let mut next = inner.transaction.clone();
+        next.state = UpdateState::Activating;
+        next.phase = "activating".to_string();
+        next.error = None;
+        self.commit_transaction(&mut inner, next)?;
+        inner.active_sessions = active_sessions;
+        let snapshot = transaction::snapshot(&self.root, &inner.transaction, active_sessions)?;
         inner.activation_requested = true;
         Ok(snapshot)
     }
@@ -346,20 +387,27 @@ impl Broker {
             .inner
             .lock()
             .map_err(|_| "Broker 状态锁已损坏".to_string())?;
-        if matches!(
+        if !matches!(
             inner.transaction.state,
-            UpdateState::Activating | UpdateState::HealthCheck
+            UpdateState::Checking
+                | UpdateState::Available
+                | UpdateState::Downloading
+                | UpdateState::Verifying
+                | UpdateState::Staged
+                | UpdateState::WaitingForDrain
+                | UpdateState::RebootRequired
+                | UpdateState::Failed
+                | UpdateState::RepairRequired
         ) || !self.cancel_allowed.load(Ordering::SeqCst)
         {
             return Err("更新已跨过可取消边界".to_string());
         }
+        let next = transaction::begin(CheckTrigger::Manual, None, UpdateState::Idle, "idle");
+        self.commit_transaction(&mut inner, next)?;
         self.cancel_requested.store(true, Ordering::SeqCst);
-        inner.transaction =
-            transaction::begin(CheckTrigger::Manual, None, UpdateState::Idle, "idle");
         inner.active_sessions = 0;
         inner.activation_requested = false;
-        transaction::save(&self.root, &inner.transaction)?;
-        transaction::snapshot(&self.root, inner.active_sessions)
+        transaction::snapshot(&self.root, &inner.transaction, inner.active_sessions)
     }
 
     fn resolve_target(&self) -> Result<(Option<UpdateTarget>, Option<TargetIdentity>), String> {
@@ -394,7 +442,7 @@ impl Broker {
         target_identity: Option<&TargetIdentity>,
         progress: &mut dyn FnMut(&str, &str, u64, u64),
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<(), String> {
+    ) -> Result<component::StageReleaseOutcome, String> {
         match target {
             UpdateTarget::Installer { version } => {
                 let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
@@ -416,6 +464,7 @@ impl Broker {
                     progress,
                     cancelled,
                 )?;
+                Ok(component::StageReleaseOutcome::Staged)
             }
             UpdateTarget::Release { version } => {
                 let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
@@ -428,10 +477,9 @@ impl Broker {
                     target_identity,
                     &bootstrap.payload.release.manifest.sha256,
                 )?;
-                component::stage_release(&self.root, &manifest, progress, cancelled)?;
+                component::stage_release(&self.root, &manifest, progress, cancelled)
             }
         }
-        Ok(())
     }
 
     fn revalidate_target(
@@ -470,52 +518,62 @@ impl Broker {
         }
     }
 
-    fn take_activation(&self) -> Option<UpdateTarget> {
+    fn take_activation(&self) -> Option<(UpdateTarget, Option<TargetIdentity>)> {
         self.inner.lock().ok().and_then(|mut inner| {
             if inner.activation_requested {
                 inner.activation_requested = false;
-                inner.transaction.target.clone()
+                inner
+                    .transaction
+                    .target
+                    .clone()
+                    .map(|target| (target, inner.transaction.target_identity.clone()))
             } else {
                 None
             }
         })
     }
 
-    fn activation_failed(&self, error: String) {
-        if let Ok(mut inner) = self.inner.lock() {
-            transaction::finish(
-                &mut inner.transaction,
-                UpdateState::RepairRequired,
-                "repair-required",
-                Some(error),
-            );
-            let _ = transaction::save(&self.root, &inner.transaction);
-        }
+    fn activation_failed(&self, error: String) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Broker 状态锁已损坏".to_string())?;
+        let mut next = inner.transaction.clone();
+        transaction::finish(
+            &mut next,
+            UpdateState::RepairRequired,
+            "repair-required",
+            Some(error),
+        );
+        self.commit_background_transaction(&mut inner, next)
     }
 
-    fn mark_health_check(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.transaction.state = UpdateState::HealthCheck;
-            inner.transaction.phase = "health-check".to_string();
-            inner.transaction.error = None;
-            let _ = transaction::save(&self.root, &inner.transaction);
-        }
+    fn mark_health_check(&self) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Broker 状态锁已损坏".to_string())?;
+        let mut next = inner.transaction.clone();
+        next.state = UpdateState::HealthCheck;
+        next.phase = "health-check".to_string();
+        next.error = None;
+        self.commit_background_transaction(&mut inner, next)
     }
 
-    fn activation_succeeded(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.transaction.state = UpdateState::Ready;
-            inner.transaction.phase = "ready".to_string();
-            inner.transaction.error = None;
-            let _ = transaction::save(&self.root, &inner.transaction);
-        }
+    fn activation_succeeded(&self) -> Result<(), String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "Broker 状态锁已损坏".to_string())?;
+        let mut next = inner.transaction.clone();
+        next.state = UpdateState::Ready;
+        next.phase = "ready".to_string();
+        next.error = None;
+        self.commit_transaction(&mut inner, next)
     }
 }
 
-pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
-    if startup_bridge(&root)? {
-        return Ok(());
-    }
+pub fn run_manager_broker(root: PathBuf, _instance: ipc::InstanceGuard) -> Result<(), String> {
     let broker = Arc::new(Broker::new(root.clone())?);
     let handler = {
         let broker = broker.clone();
@@ -534,8 +592,19 @@ pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
         })
     };
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    let server = thread::spawn(move || {
-        let _ = ipc::serve_with_ready(handler, ready_tx);
+    thread::spawn(move || {
+        let mut first = Some(ready_tx);
+        loop {
+            let result = match first.take() {
+                Some(ready) => ipc::serve_with_ready(handler.clone(), ready),
+                None => ipc::serve(handler.clone()),
+            };
+            eprintln!(
+                "Launcher Broker Named Pipe 服务退出：{}；1 秒后重建",
+                result.unwrap_err()
+            );
+            thread::sleep(Duration::from_secs(1));
+        }
     });
     match ready_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Ok(())) => {}
@@ -554,17 +623,13 @@ pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
     loop {
         let manager = launch_manager(&root)?;
         let status = wait_manager(manager)?;
-        if let Some(target) = broker.take_activation() {
-            let transaction = transaction::load(&root)?;
-            broker.revalidate_target(&target, transaction.target_identity.as_ref())?;
+        if let Some((target, target_identity)) = broker.take_activation() {
+            broker.revalidate_target(&target, target_identity.as_ref())?;
             match target {
                 UpdateTarget::Installer { version } => {
                     let (bootstrap, bootstrap_sha256) = read_bootstrap_remote_with_digest()?;
                     contract::validate_bootstrap(&bootstrap)?;
-                    verify_target_bootstrap(
-                        transaction.target_identity.as_ref(),
-                        &bootstrap_sha256,
-                    )?;
+                    verify_target_bootstrap(target_identity.as_ref(), &bootstrap_sha256)?;
                     let installer_ref = bootstrap
                         .payload
                         .installer
@@ -572,7 +637,7 @@ pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
                         .filter(|installer| installer.version == version)
                         .ok_or_else(|| "Bootstrap Installer 与激活目标不一致".to_string())?;
                     verify_target_artifact(
-                        transaction.target_identity.as_ref(),
+                        target_identity.as_ref(),
                         &installer_ref.artifact.sha256,
                     )?;
                     let installer = component::verify_staged_installer(
@@ -588,15 +653,15 @@ pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
                 }
                 UpdateTarget::Release { .. } => match activation::commit_staged(&root, &target)
                     .and_then(|_| {
-                        broker.mark_health_check();
+                        broker.mark_health_check()?;
                         activation_health(&root)
                     }) {
                     Ok(()) => {
-                        broker.activation_succeeded();
+                        broker.activation_succeeded()?;
                         continue;
                     }
                     Err(error) => {
-                        broker.activation_failed(error);
+                        broker.activation_failed(error)?;
                         return Err("激活后健康检查失败，已进入 forward-repair".to_string());
                     }
                 },
@@ -607,71 +672,7 @@ pub fn run_manager_broker(root: PathBuf) -> Result<(), String> {
         }
         break;
     }
-    drop(server);
     Ok(())
-}
-
-fn startup_bridge(root: &Path) -> Result<bool, String> {
-    let bootstrap = match read_bootstrap_remote_for_startup()? {
-        Some(bootstrap) => bootstrap,
-        None => return Ok(false),
-    };
-    contract::validate_bootstrap(&bootstrap)?;
-    let current = activation::current_release_version(root)?;
-    let target = select_target(
-        &bootstrap,
-        current.as_deref(),
-        &include_installer_version()?,
-    )?;
-    match target {
-        Some(UpdateTarget::Installer { version }) => {
-            let installer = bootstrap
-                .payload
-                .installer
-                .as_ref()
-                .filter(|installer| installer.version == version)
-                .ok_or_else(|| "Bootstrap Installer 与启动目标不一致".to_string())?;
-            component::stage_installer(
-                root,
-                &version,
-                &installer.artifact,
-                &mut |_, _, _, _| {},
-                &|| false,
-            )?;
-            let path = root
-                .join("installer-updates")
-                .join(&version)
-                .join(format!("tauri-codex_{version}_x64-setup.exe"));
-            health::verify_authenticode(&path)?;
-            job::background_command(path)
-                .arg("/S")
-                .spawn()
-                .map_err(|error| format!("无法启动新版 Installer：{error}"))?;
-            Ok(true)
-        }
-        Some(UpdateTarget::Release { version }) => {
-            let Some(manifest) = read_manifest_for_startup(&bootstrap)? else {
-                return Ok(false);
-            };
-            let current_manager = activation::current_manager_version(root)?;
-            if !manager_bridge_required(
-                current_manager.as_deref(),
-                &manifest.payload.minimum_manager_version,
-            )? {
-                return Ok(false);
-            }
-            if manifest.payload.version != version {
-                return Err("启动 compatibility bridge 的 release 目标不一致".to_string());
-            }
-            component::stage_release(root, &manifest, &mut |_, _, _, _| {}, &|| false)?;
-            let target = UpdateTarget::Release { version };
-            activation::commit_staged(root, &target)?;
-            activation_health(root)?;
-            transaction::record_ready(root, target)?;
-            Ok(false)
-        }
-        None => Ok(false),
-    }
 }
 
 fn automatic_cycle(broker: &Arc<Broker>) {
@@ -872,7 +873,7 @@ fn initial_setup(app: &AppHandle) -> Result<(), String> {
         return Err("Bootstrap release 与安装目标不一致".to_string());
     }
     let cancelled = || false;
-    let _ = component::stage_release(
+    let outcome = component::stage_release(
         &root,
         &manifest,
         &mut |phase, component, downloaded, total| {
@@ -880,6 +881,9 @@ fn initial_setup(app: &AppHandle) -> Result<(), String> {
         },
         &cancelled,
     )?;
+    if outcome == component::StageReleaseOutcome::RebootRequired {
+        return Err("Node.js 安装完成，请重启 Windows 后继续".to_string());
+    }
     let target = UpdateTarget::Release {
         version: manifest.payload.version.clone(),
     };
@@ -956,44 +960,6 @@ fn read_bootstrap_remote_with_digest() -> Result<(Bootstrap, String), String> {
     Ok((contract::parse_signed(&bytes, "Bootstrap")?, digest))
 }
 
-fn read_bootstrap_remote_for_startup() -> Result<Option<Bootstrap>, String> {
-    let client = Client::builder()
-        .user_agent("tauri-codex-launcher")
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = match client.get(format!("{OSS_ROOT}/{BOOTSTRAP_KEY}")).send() {
-        Ok(response) => response,
-        Err(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
-            return Ok(None)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let response = match response.error_for_status() {
-        Ok(response) => response,
-        Err(error) if error.status().is_some() => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    if response
-        .content_length()
-        .is_some_and(|length| length > contract::MAX_MANIFEST_BYTES)
-    {
-        return Err("Bootstrap 超过大小上限".to_string());
-    }
-    let bytes = match response.bytes() {
-        Ok(bytes) => bytes,
-        Err(error) if error.is_connect() || error.is_timeout() || error.is_body() => {
-            return Ok(None)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    if bytes.len() as u64 > contract::MAX_MANIFEST_BYTES {
-        return Err("Bootstrap 超过大小上限".to_string());
-    }
-    Ok(Some(contract::parse_signed(&bytes, "Bootstrap")?))
-}
-
 fn verify_target_bootstrap(identity: Option<&TargetIdentity>, actual: &str) -> Result<(), String> {
     let identity = identity.ok_or_else(|| "更新事务缺少冻结的目标 identity".to_string())?;
     if identity.bootstrap_sha256 != actual {
@@ -1063,63 +1029,6 @@ fn read_manifest(bootstrap: &Bootstrap) -> Result<Manifest, String> {
         ));
     }
     Ok(manifest)
-}
-
-fn read_manifest_for_startup(bootstrap: &Bootstrap) -> Result<Option<Manifest>, String> {
-    contract::validate_bootstrap(bootstrap)?;
-    let client = Client::builder()
-        .user_agent("tauri-codex-launcher")
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let artifact = &bootstrap.payload.release.manifest;
-    let response = match client
-        .get(contract::artifact_url(&artifact.object_key)?)
-        .send()
-    {
-        Ok(response) => response,
-        Err(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
-            return Ok(None)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    let response = match response.error_for_status() {
-        Ok(response) => response,
-        Err(error) if error.status().is_some() => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-    if response
-        .content_length()
-        .is_some_and(|length| length > artifact.size || length > contract::MAX_MANIFEST_BYTES)
-    {
-        return Err("manifest 超过清单大小".to_string());
-    }
-    let bytes = match response.bytes() {
-        Ok(bytes) => bytes,
-        Err(error) if error.is_connect() || error.is_timeout() || error.is_body() => {
-            return Ok(None)
-        }
-        Err(error) => return Err(error.to_string()),
-    };
-    if bytes.len() as u64 != artifact.size || contract::digest(&bytes) != artifact.sha256 {
-        return Err("manifest size/SHA-256 不匹配".to_string());
-    }
-    let manifest = contract::parse_signed(&bytes, "release manifest")?;
-    contract::validate_manifest(&manifest, &bootstrap.payload)?;
-    Ok(Some(manifest))
-}
-
-fn manager_bridge_required(installed: Option<&str>, required: &str) -> Result<bool, String> {
-    let required = semver::Version::parse(required).map_err(|error| error.to_string())?;
-    let installed = installed
-        .map(semver::Version::parse)
-        .transpose()
-        .map_err(|error| error.to_string())?;
-    Ok(match installed {
-        Some(installed) => installed < required,
-        None => true,
-    })
 }
 
 fn include_installer_version() -> Result<String, String> {
@@ -1204,7 +1113,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{manager_bridge_required, select_target};
+    use super::select_target;
     use crate::delivery::contract::{
         Artifact, Bootstrap, BootstrapPayload, InstallerRef, ReleaseRef, UpdateTarget,
     };
@@ -1266,13 +1175,5 @@ mod tests {
         );
         let older = bootstrap("1.1.0", "0.1.9", "1.1.0");
         assert!(select_target(&older, Some("0.2.0"), "1.1.0").is_err());
-    }
-
-    #[test]
-    fn ordinary_release_does_not_raise_the_manager_protocol_floor() {
-        assert!(!manager_bridge_required(Some("0.2.0"), "0.2.0").unwrap());
-        assert!(!manager_bridge_required(Some("0.3.0"), "0.2.0").unwrap());
-        assert!(manager_bridge_required(Some("0.1.9"), "0.2.0").unwrap());
-        assert!(manager_bridge_required(None, "0.2.0").unwrap());
     }
 }

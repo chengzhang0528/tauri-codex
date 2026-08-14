@@ -1,5 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, createPrivateKey, createPublicKey, randomUUID, sign, verify } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
@@ -67,6 +67,11 @@ function frozenSource() {
   const commit = gitOutput(["rev-parse", "HEAD"]);
   if (!/^[a-f0-9]{40}$/.test(commit)) fail("无法固定 source commit。");
   return commit;
+}
+
+function assertFrozenSource(expectedCommit) {
+  const actual = frozenSource();
+  if (actual !== expectedCommit) fail(`构建期间 source commit 已变化：${expectedCommit} -> ${actual}`);
 }
 
 function npmCommand() {
@@ -146,6 +151,19 @@ function filesBelow(root) {
   return files;
 }
 function sha256(filePath) { return createHash("sha256").update(readFileSync(filePath)).digest("hex"); }
+export function installedTreeSha256(root, selectedFiles = filesBelow(root)) {
+  const entries = selectedFiles.map((filePath) => {
+    const metadata = lstatSync(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) fail(`安装树不允许链接或特殊文件：${filePath}`);
+    const relative = path.relative(root, filePath);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) fail(`安装树文件越界：${filePath}`);
+    return { relative: relative.replaceAll(path.sep, "/").toLowerCase(), filePath, size: metadata.size };
+  }).sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0);
+  for (let index = 1; index < entries.length; index += 1) if (entries[index - 1].relative === entries[index].relative) fail(`安装树包含大小写冲突路径：${entries[index].relative}`);
+  const tree = createHash("sha256");
+  for (const entry of entries) tree.update(entry.relative).update("\0").update(String(entry.size)).update("\0").update(sha256(entry.filePath)).update("\n");
+  return tree.digest("hex");
+}
 function artifactRecord(filePath) { return { path: path.relative(workspaceRoot, filePath).replaceAll(path.sep, "/"), size: statSync(filePath).size, sha256: sha256(filePath) }; }
 function objectArtifact(filePath, objectKey, provenance) { const measured = artifactRecord(filePath); return { objectKey, size: measured.size, sha256: measured.sha256, provenance }; }
 function componentKey(name) { return `releases/${appVersion}/windows-x64/components/${name}`; }
@@ -167,6 +185,17 @@ function verifyManagerArchive(filePath) {
   const actual = archiveEntries(filePath);
   const expected = [...MANAGER_FILES].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`Manager archive 不完整：${actual.join(", ")}`);
+}
+
+function verifyArchiveTree(filePath, expectedDigest) {
+  const root = path.join(buildRoot, `verify-tree-${randomUUID()}`);
+  mkdirSync(root, { recursive: true });
+  try {
+    run("tar.exe", ["-xf", filePath, "-C", root]);
+    if (installedTreeSha256(root) !== expectedDigest) fail(`archive 安装树摘要不匹配：${filePath}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function bootstrap() {
@@ -204,13 +233,17 @@ function prepareComponents(signing) {
   createArchive(codexArchive, codexRoot, ["."]);
   copyFileSync(nodeMsi, nodeAsset);
   verifyManagerArchive(managerArchive);
+  const managerTreeSha256 = installedTreeSha256(targetRoot, MANAGER_FILES.map((name) => path.join(targetRoot, name)));
+  const codexTreeSha256 = installedTreeSha256(codexRoot);
+  verifyArchiveTree(managerArchive, managerTreeSha256);
+  verifyArchiveTree(codexArchive, codexTreeSha256);
   const payload = {
     product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
     minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,
     components: [
-      { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: "authenticode+ed25519", artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), "authenticode+ed25519") },
-      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: "authenticode+ed25519", artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), "authenticode+ed25519") },
-      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: "authenticode+ed25519", artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), "authenticode+ed25519") },
+      { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: "authenticode+ed25519", installedTreeSha256: managerTreeSha256, artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), "authenticode+ed25519") },
+      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: "authenticode+ed25519", installedTreeSha256: codexTreeSha256, artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), "authenticode+ed25519") },
+      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: "authenticode+ed25519", installedTreeSha256: null, artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), "authenticode+ed25519") },
     ],
   };
   const envelope = signEnvelope(payload, signing);
@@ -274,11 +307,16 @@ function buildReleaseCandidate() {
   const buildEnv = buildBinaries(toolchain, signing);
   const components = prepareComponents(signing);
   const seedPayload = { product: "tauri-codex", platform: "windows", architecture: "x86_64", minimumLauncherVersion: installerVersion, installer: null, release: { version: appVersion, manifest: components.manifest } };
-  writeJson(bootstrapResource, signEnvelope(seedPayload, signing));
   let installer;
   let installerLocalPath = null;
   if (shouldBuildInstaller()) {
-    runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv);
+    const originalBootstrap = readFileSync(bootstrapResource);
+    try {
+      writeJson(bootstrapResource, signEnvelope(seedPayload, signing));
+      runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv);
+    } finally {
+      writeFileSync(bootstrapResource, originalBootstrap);
+    }
     if (!existsSync(installerSource)) fail(`Tauri 未生成 ${installerSource}`);
     for (const binary of [launcherSource, managerSource, webviewLoaderSource]) verifyAuthenticode(binary);
     signAuthenticode(installerSource); copyFileSync(installerSource, installerOutput); installer = objectArtifact(installerOutput, installerKey(path.basename(installerOutput)), "authenticode+ed25519"); installerLocalPath = path.relative(releaseRoot, installerOutput).replaceAll(path.sep, "/");
@@ -294,6 +332,7 @@ function buildReleaseCandidate() {
     { role: "installer", localPath: installerLocalPath, artifact: installer },
   ];
   const candidate = { product: "tauri-codex", version: appVersion, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit, bootstrap: { localPath: "bootstrap.json", objectKey: "bootstrap/windows-x64.json", size: statSync(bootstrapOutput).size, sha256: sha256(bootstrapOutput), provenance: "ed25519" }, immutable };
+  assertFrozenSource(sourceCommit);
   writeJson(candidateOutput, signEnvelope(candidate, signing));
   console.log(JSON.stringify({ built: true, version: appVersion, installerVersion, installerReused: !installerLocalPath, candidate: artifactRecord(candidateOutput) }, null, 2));
 }
@@ -302,7 +341,7 @@ function verifyReleaseCandidate() {
   if (!existsSync(candidateOutput)) fail("候选不存在，先运行 installer:build。");
   const trust = publicSigning(); const candidateEnvelope = JSON.parse(readFileSync(candidateOutput, "utf8"));
   const candidate = verifyEnvelope(candidateEnvelope, trust);
-  if (candidate.version !== appVersion || candidate.installerVersion !== installerVersion || candidate.sourceCommit !== gitOutput(["rev-parse", "HEAD"])) fail("candidate identity 与版本源不一致。");
+  if (candidate.version !== appVersion || candidate.installerVersion !== installerVersion || candidate.sourceCommit !== frozenSource()) fail("candidate identity 与版本源不一致。");
   const manifest = JSON.parse(readFileSync(manifestOutput, "utf8")); const bootstrapEnvelope = JSON.parse(readFileSync(bootstrapOutput, "utf8"));
   const manifestPayload = verifyEnvelope(manifest, trust); const bootstrapPayload = verifyEnvelope(bootstrapEnvelope, trust);
   if (manifestPayload.version !== appVersion || bootstrapPayload.release.version !== appVersion || bootstrapPayload.release.manifest.sha256 !== sha256(manifestOutput) || bootstrapPayload.installer.version !== installerVersion) fail("signed closure 版本或摘要不一致。");
@@ -312,6 +351,9 @@ function verifyReleaseCandidate() {
     if (statSync(filePath).size !== item.artifact.size || sha256(filePath) !== item.artifact.sha256) fail(`candidate bytes 已变化：${item.localPath}`);
   }
   const manager = candidate.immutable.find((item) => item.role === "manager"); verifyManagerArchive(path.join(releaseRoot, manager.localPath));
+  const codex = candidate.immutable.find((item) => item.role === "codex");
+  verifyArchiveTree(path.join(releaseRoot, manager.localPath), manifestPayload.components.find((component) => component.id === "manager").installedTreeSha256);
+  verifyArchiveTree(path.join(releaseRoot, codex.localPath), manifestPayload.components.find((component) => component.id === "codex").installedTreeSha256);
   for (const entry of [path.join(appRoot, "dist", "index.html"), path.join(appRoot, "dist", "launcher.html")]) if (!existsSync(entry)) fail(`Vite 构建入口缺失：${entry}`);
   console.log(JSON.stringify({ verified: true, version: appVersion, installerVersion, schemaVersion: 2, source: OSS_ROOT }, null, 2));
 }
