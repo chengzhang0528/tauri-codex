@@ -106,15 +106,38 @@ test("release workflow commits OSS before creating OSS-only GitHub Release Notes
   const workflow = readFileSync(new URL("../.github/workflows/windows-release.yml", import.meta.url), "utf8");
   assert.match(workflow, /workflow_dispatch:/);
   assert.doesNotMatch(workflow, /\n\s+push:/);
-  assert.match(workflow, /build-once:[\s\S]*needs: \[oss-preflight\]/);
-  assert.match(workflow, /oss-stage:[\s\S]*needs: \[build-once\]/);
-  assert.match(workflow, /oss-commit:[\s\S]*needs: \[build-once, oss-stage\]/);
-  assert.match(workflow, /github-release-notes:[\s\S]*needs: \[build-once, oss-commit\]/);
+  assert.match(workflow, /- candidate\s+- publish\s+- finalize\s+- rollback/);
+  assert.match(workflow, /candidate-build:[\s\S]*if: inputs\.operation == 'candidate'/);
+  assert.match(workflow, /publish-stage:[\s\S]*needs: \[resolve, publish-preflight\]/);
+  assert.match(workflow, /publish-commit:[\s\S]*needs: \[resolve, publish-stage\]/);
+  assert.match(workflow, /finalize-release:[\s\S]*if: inputs\.operation == 'finalize'/);
+  assert.match(workflow, /rollback-bootstrap:[\s\S]*if: inputs\.operation == 'rollback'/);
+  assert.match(workflow, /run-id: \$\{\{ inputs\.candidate_run_id \}\}/);
+  assert.match(workflow, /publish:release:oss -- snapshot/);
+  assert.match(workflow, /publish:release:oss -- confirm/);
+  assert.match(workflow, /publish:release:oss -- rollback/);
   assert.match(workflow, /TAURI_CODEX_RELEASE_PRIVATE_KEY/);
   assert.match(workflow, /TAURI_CODEX_AUTHENTICODE_PFX_BASE64/);
   assert.match(workflow, /shared-public-assets\.oss-cn-beijing\.aliyuncs\.com\/project-tauri-codex/);
   assert.doesNotMatch(workflow, /^\s+files:/m);
   assert.doesNotMatch(workflow, /Publish GitHub Release assets/);
+});
+
+test("public and human documentation match canonical versions and OSS-only delivery", () => {
+  const app = JSON.parse(readFileSync(new URL("../app/package.json", import.meta.url), "utf8"));
+  const installer = JSON.parse(readFileSync(new URL("../app/installer-versions.json", import.meta.url), "utf8"));
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const guide = readFileSync(new URL("../人类-文档/开发/构建Windows桌面应用.md", import.meta.url), "utf8");
+  const decision = readFileSync(new URL("../文档/项目/项目_tauri-codex/决策/DEC-0001-Windows-x64-Codex桌面封装方案.md", import.meta.url), "utf8");
+  assert.match(readme, new RegExp(`当前源码候选版本为 \`v${app.version.replaceAll(".", "\\.")}\``));
+  assert.match(readme, new RegExp(`project-tauri-codex/installers/${installer.installerVersion.replaceAll(".", "\\.")}/windows-x64/tauri-codex_${installer.installerVersion.replaceAll(".", "\\.")}_x64-setup\\.exe`));
+  assert.doesNotMatch(readme, /\[下载[^\]]*Windows[^\]]*\]\(https:\/\/github\.com\/[^)]+\/releases/i);
+  assert.doesNotMatch(readme, /暂存 GitHub Releases/);
+  assert.match(guide, new RegExp(`\\.codex-build/build/${app.version.replaceAll(".", "\\.")}/windows-x64/tauri-codex\\.exe`));
+  assert.match(guide, new RegExp(`\\.codex-build/releases/${app.version.replaceAll(".", "\\.")}/windows-x64/`));
+  assert.doesNotMatch(guide, /推送[^。\n]*tag|首次发布 tag/);
+  assert.match(decision, /setup-required/);
+  assert.doesNotMatch(decision, /自动准备完整 release 或独立 Installer|Launcher\/Installer 更新运行/);
 });
 
 test("runtime and tooling contain no legacy delivery owner or fallback", () => {

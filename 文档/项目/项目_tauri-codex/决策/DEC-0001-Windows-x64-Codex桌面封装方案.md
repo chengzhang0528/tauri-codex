@@ -96,9 +96,9 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 更新由一笔 Launcher 持久事务表达：`idle → checking → up-to-date | available → downloading → verifying → staged → waiting-for-drain → activating → health-check → ready`；普通失败为 `failed`，激活后失败为 `repair-required`。
 
 - Manager 只有一个动态主按钮。手动 `check` 是只读操作；`available` 后同一按钮提交 `prepare`；`staged` 后且活动会话为零时提交 `activate`。
-- Launcher 启动后及运行期间约每六小时自动检查，并可自动准备完整 release 或独立 Installer；自动路径不激活、不退出 Manager、不结束活动 TUI。
+- Launcher 启动后及运行期间约每六小时自动检查，并可自动准备兼容的完整 release；发现新版 Installer/Launcher 时只进入 `setup-required`。自动路径不激活、不退出 Manager、不结束活动 TUI。
 - Manager、Codex 与 Node fallback 由同一个 manifest 共同 stage，不存在 Codex 独立 `current`、npm view/install 或单独版本切换。
-- Launcher/Installer 更新运行已完成 Authenticode 验证的新版 NSIS Setup；普通 release 更新由 Launcher 原子切换。激活后健康失败只 forward-repair 当前目标，不自动回滚。
+- Launcher/Installer 更新由用户在应用外运行已完成 Authenticode 验证的新版 NSIS Setup；运行中的 Launcher/Manager 不下载、暂存或执行 Setup。普通 release 更新由 Launcher 原子切换；激活后健康失败只 forward-repair 当前目标，不自动回滚。
 - schema v2 是破坏性切换，不提供 schema v1 或旧 Launcher 桥接；旧安装必须重新运行新版 Installer。
 
 ## 实施准入

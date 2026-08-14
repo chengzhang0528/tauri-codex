@@ -6,17 +6,17 @@ tauri-codex 是独立的社区项目，不是 OpenAI 官方产品，也不代表
 
 ## 当前可用范围
 
-当前源码候选版本为 `v0.1.3`；公开版本和 Windows x64 安装程序以 [GitHub Releases](https://github.com/chengzhang0528/tauri-codex/releases/latest) 为准，也可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 薄安装器。
+当前源码候选版本为 `v0.2.0`；Windows x64 安装程序只从[固定阿里云 OSS 地址](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/1.1.0/windows-x64/tauri-codex_1.1.0_x64-setup.exe)下载，版本说明见 [GitHub Releases](https://github.com/chengzhang0528/tauri-codex/releases/latest)。也可以按[构建指南](人类-文档/开发/构建Windows桌面应用.md)从源码启动或生成 NSIS 薄安装器。
 
 - 支持 Windows 10 22H2 x64 和 Windows 11 x64。
 - 不支持更早的 Windows、Windows ARM64、macOS 或 Linux；这些场景可以按[支持说明](SUPPORT.md)提交功能建议。
-- 应用启动和运行期间会自动检查、下载、校验并暂存 GitHub Releases 与内置 Codex 更新；用户仍需明确点击激活更新，活动会话不会被自动中断。
+- 应用启动和运行期间会从固定 OSS 检查 signed release closure，并可下载、校验和暂存兼容的 Manager、Codex 与 Node 组件；用户仍需明确点击激活更新，活动会话不会被自动中断。新版 Installer/Launcher 只显示 `setup-required`，必须由用户在应用外运行新版 Setup。
 - Bug、兼容性问题和使用反馈通过 GitHub Issues 跟踪，提交入口和必要信息见[支持说明](SUPPORT.md)。
 - 安全漏洞不要公开披露，按[安全政策](SECURITY.md)报告。
 
 ## 项目入口
 
-- [下载最新 Windows x64 安装包](https://github.com/chengzhang0528/tauri-codex/releases/latest)
+- [下载 Windows x64 安装包](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/1.1.0/windows-x64/tauri-codex_1.1.0_x64-setup.exe)
 - [构建 Windows 桌面应用](人类-文档/开发/构建Windows桌面应用.md)
 - [全部人类文档](人类-文档/README.md)
 - [产品契约](文档/项目/项目_tauri-codex/产品契约.md)

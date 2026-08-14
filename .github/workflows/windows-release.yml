@@ -3,12 +3,31 @@ name: tauri-codex Windows release
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: "candidate / publish / finalize / rollback"
+        required: true
+        type: choice
+        options:
+          - candidate
+          - publish
+          - finalize
+          - rollback
       version:
-        description: "必须与 app/package.json 一致且尚未发布的 Manager 版本"
+        description: "必须与 app/package.json 一致的 Manager 版本"
         required: true
         default: "0.2.0"
+      source_commit:
+        description: "候选绑定的完整 40 位 source commit"
+        required: true
+      candidate_run_id:
+        description: "publish/finalize/rollback 使用的 candidate workflow run ID"
+        required: false
+      publish_run_id:
+        description: "rollback 使用的 publish workflow run ID"
+        required: false
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -16,46 +35,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  oss-preflight:
-    name: OSS publisher admission
+  resolve:
+    name: Resolve immutable release operation
     runs-on: windows-latest
     timeout-minutes: 10
-    environment: oss-release
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.19.0
-
-      - name: Prove project-scoped write and anonymous readback
-        shell: pwsh
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-        run: npm run publish:release:oss -- preflight ${{ inputs.version }}
-
-  build-once:
-    name: Build and verify one signed Windows x64 candidate
-    needs: [oss-preflight]
-    runs-on: windows-latest
-    timeout-minutes: 60
-    environment: oss-release
     outputs:
       version: ${{ steps.release.outputs.version }}
       installer-version: ${{ steps.release.outputs.installer-version }}
+      source-commit: ${{ steps.release.outputs.source-commit }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_commit }}
           fetch-depth: 0
 
-      - name: Resolve immutable release identity
+      - name: Validate operation and release identity
         id: release
         shell: pwsh
         run: |
+          $operation = "${{ inputs.operation }}"
           $version = "${{ inputs.version }}"
+          $sourceCommit = "${{ inputs.source_commit }}"
+          $candidateRunId = "${{ inputs.candidate_run_id }}"
+          $publishRunId = "${{ inputs.publish_run_id }}"
           if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
             throw "Invalid release version: $version"
+          }
+          if ($sourceCommit -notmatch '^[a-f0-9]{40}$' -or (git rev-parse HEAD) -ne $sourceCommit) {
+            throw "source_commit must resolve to the checked-out 40-character commit"
+          }
+          if ($operation -ne 'candidate' -and $candidateRunId -notmatch '^[1-9][0-9]*$') {
+            throw "$operation requires candidate_run_id"
+          }
+          if ($operation -eq 'rollback' -and $publishRunId -notmatch '^[1-9][0-9]*$') {
+            throw "rollback requires publish_run_id"
           }
           $appVersion = (Get-Content -Raw app/package.json | ConvertFrom-Json).version
           $installerVersion = (Get-Content -Raw app/installer-versions.json | ConvertFrom-Json).installerVersion
@@ -63,14 +76,30 @@ jobs:
             throw "Release version $version does not match app/package.json $appVersion"
           }
           if (git tag --list "v$version") {
-            throw "Tag v$version already exists"
+            throw "Tag v$version already exists; this workflow never mutates an existing release"
           }
-          $latest = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | ForEach-Object { $_.Substring(1) } | Sort-Object { [version]$_ } | Select-Object -Last 1
-          if ($latest -and ([version]$version -le [version]$latest)) {
-            throw "Release version $version must be newer than $latest"
+          if ($operation -eq 'candidate') {
+            $latest = git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | ForEach-Object { $_.Substring(1) } | Sort-Object { [version]$_ } | Select-Object -Last 1
+            if ($latest -and ([version]$version -le [version]$latest)) {
+              throw "Release version $version must be newer than $latest"
+            }
           }
           "version=$version" >> $env:GITHUB_OUTPUT
           "installer-version=$installerVersion" >> $env:GITHUB_OUTPUT
+          "source-commit=$sourceCommit" >> $env:GITHUB_OUTPUT
+
+  candidate-build:
+    name: Build and verify one signed Windows x64 candidate
+    if: inputs.operation == 'candidate'
+    needs: [resolve]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    environment: oss-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source-commit }}
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -128,29 +157,55 @@ jobs:
       - name: Build and verify frozen release candidate
         shell: pwsh
         env:
-          TAURI_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          TAURI_RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
           TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
           TAURI_CODEX_RELEASE_PRIVATE_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PRIVATE_KEY }}
           TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
           TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL: ${{ secrets.TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL }}
         run: npm run build:release
 
-      - name: Upload frozen candidate for job handoff only
+      - name: Upload frozen candidate
         uses: actions/upload-artifact@v4
         with:
-          name: tauri-codex_${{ steps.release.outputs.version }}_windows-x64_candidate
-          path: .codex-build/releases/${{ steps.release.outputs.version }}/windows-x64/*
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
-  oss-stage:
-    name: Stage OSS immutable closure
-    needs: [build-once]
+  publish-preflight:
+    name: Prove OSS publisher admission
+    if: inputs.operation == 'publish'
+    needs: [resolve]
+    runs-on: windows-latest
+    timeout-minutes: 10
+    environment: oss-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source-commit }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - name: Prove project-scoped write and anonymous readback
+        shell: pwsh
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: npm run publish:release:oss -- preflight ${{ needs.resolve.outputs.version }}
+
+  publish-stage:
+    name: Stage OSS closure and freeze rollback snapshot
+    if: inputs.operation == 'publish'
+    needs: [resolve, publish-preflight]
     runs-on: windows-latest
     timeout-minutes: 20
     environment: oss-release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source-commit }}
 
       - uses: actions/setup-node@v4
         with:
@@ -158,26 +213,45 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: tauri-codex_${{ needs.build-once.outputs.version }}_windows-x64_candidate
-          path: .codex-build/releases/${{ needs.build-once.outputs.version }}/windows-x64
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
 
       - name: Upload and anonymously read back immutable objects
         shell: pwsh
-        env:
+        env: &oss-publisher
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
           TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
           TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
-        run: npm run publish:release:oss -- stage ${{ needs.build-once.outputs.version }}
+        run: npm run publish:release:oss -- stage ${{ needs.resolve.outputs.version }}
 
-  oss-commit:
-    name: Commit OSS Bootstrap last
-    needs: [build-once, oss-stage]
+      - name: Snapshot the exact previous Bootstrap
+        shell: pwsh
+        env: *oss-publisher
+        run: npm run publish:release:oss -- snapshot ${{ needs.resolve.outputs.version }}
+
+      - name: Upload rollback snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64/bootstrap-rollback-snapshot.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-commit:
+    name: Commit OSS Bootstrap from the frozen snapshot
+    if: inputs.operation == 'publish'
+    needs: [resolve, publish-stage]
     runs-on: windows-latest
     timeout-minutes: 20
     environment: oss-release
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source-commit }}
 
       - uses: actions/setup-node@v4
         with:
@@ -185,33 +259,101 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: tauri-codex_${{ needs.build-once.outputs.version }}_windows-x64_candidate
-          path: .codex-build/releases/${{ needs.build-once.outputs.version }}/windows-x64
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
 
-      - name: Re-read closure and commit the mutable Bootstrap
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+
+      - name: Conditionally commit and read back Bootstrap
         shell: pwsh
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
-          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
-          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
-        run: npm run publish:release:oss -- commit ${{ needs.build-once.outputs.version }}
+        env: *oss-publisher
+        run: |
+          npm run publish:release:oss -- commit ${{ needs.resolve.outputs.version }}
+          npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
 
-  github-release-notes:
-    name: Create GitHub tag and OSS-only Release Notes
-    needs: [build-once, oss-commit]
+  finalize-release:
+    name: Verify OSS and create GitHub Release Notes
+    if: inputs.operation == 'finalize'
+    needs: [resolve]
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    environment: oss-release
     permissions:
+      actions: read
       contents: write
     steps:
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@v4
         with:
-          tag_name: v${{ needs.build-once.outputs.version }}
-          target_commitish: ${{ github.sha }}
+          ref: ${{ needs.resolve.outputs.source-commit }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Confirm public OSS candidate identity
+        shell: pwsh
+        env: *oss-publisher
+        run: npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
+
+      - name: Create OSS-only GitHub Release Notes
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.resolve.outputs.version }}
+          target_commitish: ${{ needs.resolve.outputs.source-commit }}
           generate_release_notes: true
           body: |
             ## Windows x64 downloads
 
-            - [Installer](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/${{ needs.build-once.outputs.installer-version }}/windows-x64/tauri-codex_${{ needs.build-once.outputs.installer-version }}_x64-setup.exe)
-            - [Signed release manifest](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/releases/${{ needs.build-once.outputs.version }}/windows-x64/manifest.json)
+            - [Installer](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/${{ needs.resolve.outputs.installer-version }}/windows-x64/tauri-codex_${{ needs.resolve.outputs.installer-version }}_x64-setup.exe)
+            - [Signed release manifest](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/releases/${{ needs.resolve.outputs.version }}/windows-x64/manifest.json)
+
+  rollback-bootstrap:
+    name: Conditionally restore the previous OSS Bootstrap
+    if: inputs.operation == 'rollback'
+    needs: [resolve]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: oss-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source-commit }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.19.0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
+          path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.publish_run_id }}
+
+      - name: Restore exact previous Bootstrap only if candidate is still current
+        shell: pwsh
+        env: *oss-publisher
+        run: npm run publish:release:oss -- rollback ${{ needs.resolve.outputs.version }}

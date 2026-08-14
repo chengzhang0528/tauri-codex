@@ -1,6 +1,6 @@
 import { createHash, createHmac, createPublicKey, randomUUID, verify } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +9,7 @@ import { canonicalJson } from "./windows-pipeline.mjs";
 export const OSS_BASE_URL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 export const OSS_BUCKET = "shared-public-assets";
 export const OSS_BOOTSTRAP_KEY = "bootstrap/windows-x64.json";
+export const ROLLBACK_SNAPSHOT_NAME = "bootstrap-rollback-snapshot.json";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptRoot, "..");
@@ -78,9 +79,11 @@ async function putObject(fetchImpl, config, key, bytes, immutable, conditions = 
   if (!(response.ok || (immutable && response.status === 409))) throw new Error(`OSS PUT ${key} returned HTTP ${response.status}`);
 }
 
-async function deleteObject(fetchImpl, config, key) {
+async function deleteObject(fetchImpl, config, key, conditions = {}) {
   const date = new Date().toUTCString(); const base = new URL(config.baseURL);
-  const response = await fetchImpl(`${config.baseURL}/${key}`, { method: "DELETE", headers: { Date: date, Authorization: ossAuthorization({ method: "DELETE", date, key, secret: config.accessKeySecret, accessKeyId: config.accessKeyId, basePath: base.pathname.replace(/\/$/, ""), bucket: config.bucket }) }, redirect: "error" });
+  const headers = { Date: date, Authorization: ossAuthorization({ method: "DELETE", date, key, secret: config.accessKeySecret, accessKeyId: config.accessKeyId, basePath: base.pathname.replace(/\/$/, ""), bucket: config.bucket }) };
+  if (conditions.ifMatch) headers["If-Match"] = conditions.ifMatch;
+  const response = await fetchImpl(`${config.baseURL}/${key}`, { method: "DELETE", headers, redirect: "error" });
   if (!(response.ok || response.status === 204 || response.status === 404)) throw new Error(`OSS DELETE ${key} returned HTTP ${response.status}`);
 }
 
@@ -146,6 +149,25 @@ function validatePublishedBootstrap(bootstrap) {
   if (bootstrap.release.manifest.objectKey !== `releases/${bootstrap.release.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
 }
 
+function validateLegacyBootstrap(bootstrap) {
+  if (bootstrap?.schemaVersion !== 1 || bootstrap.product !== "tauri-codex" || bootstrap.platform !== "windows" || bootstrap.architecture !== "x86_64") throw new Error("legacy Bootstrap identity 无效");
+  if (!stableVersion.test(bootstrap.installer?.version) || !stableVersion.test(bootstrap.release?.version)) throw new Error("legacy Bootstrap version 无效");
+  validateArtifact({ ...bootstrap.installer.artifact, provenance: "legacy-authenticode" }, `installers/${bootstrap.installer.version}/windows-x64/`);
+  validateArtifact({ ...bootstrap.release.manifest, provenance: "legacy-manifest" }, `releases/${bootstrap.release.version}/windows-x64/`);
+}
+
+function previousBootstrapPayload(bytes, trust) {
+  let envelope;
+  try { envelope = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("previous Bootstrap JSON 无效"); }
+  if (envelope?.schemaVersion === 1) {
+    validateLegacyBootstrap(envelope);
+    return envelope;
+  }
+  const payload = verifySignedEnvelope(envelope, trust, "previous Bootstrap");
+  validatePublishedBootstrap(payload);
+  return payload;
+}
+
 function validateBootstrapPayload(bootstrap, candidate) {
   validatePublishedBootstrap(bootstrap);
   if (bootstrap.product !== candidate.product || bootstrap.platform !== candidate.platform || bootstrap.architecture !== candidate.architecture || !stableVersion.test(bootstrap.minimumLauncherVersion) || compareVersions(bootstrap.minimumLauncherVersion, candidate.installerVersion) > 0) throw new Error("Bootstrap compatibility 规则无效");
@@ -198,6 +220,35 @@ async function verifyObject(fetchImpl, config, artifact, label) {
   return bytes;
 }
 
+function snapshotFile(releaseRoot, snapshotPath) {
+  return path.resolve(snapshotPath ?? path.join(releaseRoot, ROLLBACK_SNAPSHOT_NAME));
+}
+
+function validEtag(etag) {
+  return typeof etag === "string" && /^"[A-Za-z0-9-]{16,128}"$/.test(etag);
+}
+
+function loadRollbackSnapshot(releaseRoot, snapshotPath, release) {
+  const file = snapshotFile(releaseRoot, snapshotPath);
+  let snapshot;
+  try { snapshot = JSON.parse(readFileSync(file, "utf8")); } catch { throw new Error("Bootstrap rollback snapshot 无效或缺失"); }
+  if (snapshot?.schemaVersion !== 1 || snapshot.objectKey !== OSS_BOOTSTRAP_KEY || snapshot.target?.size !== release.bootstrapBytes.length || snapshot.target?.sha256 !== sha256(release.bootstrapBytes)) throw new Error("Bootstrap rollback snapshot target 不匹配");
+  if (snapshot.previous === null) return { file, snapshot, previousBytes: null };
+  if (!snapshot.previous || !validEtag(snapshot.previous.etag) || !Number.isSafeInteger(snapshot.previous.size) || snapshot.previous.size <= 0 || !digestPattern.test(snapshot.previous.sha256) || typeof snapshot.previous.bytesBase64 !== "string") throw new Error("Bootstrap rollback snapshot previous record 无效");
+  let previousBytes;
+  try { previousBytes = Buffer.from(snapshot.previous.bytesBase64, "base64"); } catch { throw new Error("Bootstrap rollback snapshot bytes 无效"); }
+  if (previousBytes.length !== snapshot.previous.size || sha256(previousBytes) !== snapshot.previous.sha256 || previousBytes.toString("base64") !== snapshot.previous.bytesBase64) throw new Error("Bootstrap rollback snapshot bytes 已被篡改");
+  return { file, snapshot, previousBytes };
+}
+
+function assertCurrentMatchesSnapshot(current, snapshotRecord) {
+  if (snapshotRecord.previousBytes === null) {
+    if (current) throw new Error("current Bootstrap 与空 rollback snapshot 不一致");
+    return;
+  }
+  if (!current || !current.bytes.equals(snapshotRecord.previousBytes) || current.etag !== snapshotRecord.snapshot.previous.etag) throw new Error("current Bootstrap 已在 snapshot 后变化");
+}
+
 export async function preflightPublisher({ accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET, probeId = randomUUID() }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const key = `probes/tauri-codex-${probeId}.txt`; const bytes = Buffer.from(`tauri-codex OSS probe ${probeId}\n`);
   await putObject(fetchImpl, config, key, bytes, true);
@@ -223,16 +274,34 @@ export async function stageRelease({ releaseRoot, expectedSourceCommit, accessKe
   return { staged: true, release: release.candidate.version, objects: release.immutable.map((item) => item.artifact.objectKey) };
 }
 
-export async function commitRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+export async function snapshotRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  settings({ accessKeyId, accessKeySecret, baseURL, bucket });
+  const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+  const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  if (current && !validEtag(current.etag)) throw new Error("current Bootstrap 缺少可用于条件恢复的 ETag");
+  if (current) previousBootstrapPayload(current.bytes, trust);
+  const snapshot = {
+    schemaVersion: 1,
+    objectKey: OSS_BOOTSTRAP_KEY,
+    target: { size: release.bootstrapBytes.length, sha256: sha256(release.bootstrapBytes) },
+    previous: current ? { etag: current.etag, size: current.bytes.length, sha256: sha256(current.bytes), bytesBase64: current.bytes.toString("base64") } : null,
+  };
+  const file = snapshotFile(releaseRoot, snapshotPath);
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, `${JSON.stringify(snapshot, null, 2)}\n`, { flag: "wx" });
+  return { snapshotted: true, release: release.candidate.version, snapshot: file, previous: current ? snapshot.previous.sha256 : null };
+}
+
+export async function commitRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
+  const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
   const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  assertCurrentMatchesSnapshot(current, snapshot);
   const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
   const nextPayload = verifySignedEnvelope(nextEnvelope, trust, "next Bootstrap");
   if (current) {
-    const currentEnvelope = JSON.parse(current.bytes.toString("utf8"));
-    const currentPayload = verifySignedEnvelope(currentEnvelope, trust, "current Bootstrap");
-    validatePublishedBootstrap(currentPayload);
+    const currentPayload = previousBootstrapPayload(current.bytes, trust);
     const currentVersion = currentPayload?.release?.version;
     const nextVersion = nextPayload?.release?.version;
     const currentInstallerVersion = currentPayload?.installer?.version;
@@ -241,8 +310,7 @@ export async function commitRelease({ releaseRoot, expectedSourceCommit, accessK
     if (currentInstallerVersion && nextInstallerVersion && stableVersion.test(currentInstallerVersion) && stableVersion.test(nextInstallerVersion) && compareVersions(nextInstallerVersion, currentInstallerVersion) < 0) throw new Error(`refusing Installer downgrade ${currentInstallerVersion} -> ${nextInstallerVersion}`);
     if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) === 0 && !current.bytes.equals(release.bootstrapBytes)) throw new Error(`refusing same-version Bootstrap replacement ${nextVersion}`);
     if (current.bytes.equals(release.bootstrapBytes)) return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY, idempotent: true };
-    if (!current.etag) throw new Error("current Bootstrap 缺少 ETag，拒绝无条件覆盖");
-    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifMatch: current.etag });
+    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifMatch: snapshot.snapshot.previous.etag });
   } else {
     await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifNoneMatch: true });
   }
@@ -250,15 +318,38 @@ export async function commitRelease({ releaseRoot, expectedSourceCommit, accessK
   return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
 }
 
-export async function publishRelease(options) { await stageRelease(options); return commitRelease(options); }
+export async function confirmRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+  for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
+  const current = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  if (!current?.equals(release.bootstrapBytes)) throw new Error("public OSS Bootstrap 与 candidate 不一致");
+  return { confirmed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
+}
+
+export async function rollbackRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+  const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
+  const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  if (!current?.bytes.equals(release.bootstrapBytes) || !validEtag(current.etag)) throw new Error("rollback 拒绝覆盖非本候选 Bootstrap");
+  if (snapshot.previousBytes) {
+    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, snapshot.previousBytes, false, { ifMatch: current.etag });
+  } else {
+    await deleteObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, { ifMatch: current.etag });
+  }
+  const restored = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+  if (snapshot.previousBytes ? !restored?.equals(snapshot.previousBytes) : restored !== null) throw new Error("OSS Bootstrap rollback readback mismatch");
+  return { rolledBack: true, release: release.candidate.version, restored: snapshot.previousBytes ? snapshot.snapshot.previous.sha256 : null };
+}
+
+export async function publishRelease(options) { await stageRelease(options); await snapshotRelease(options); return commitRelease(options); }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   const [mode, version] = process.argv.slice(2); const appVersion = JSON.parse(readFileSync(path.join(workspaceRoot, "app", "package.json"), "utf8")).version;
   try {
     if (!stableVersion.test(version) || version !== appVersion) throw new Error("version must match app/package.json");
     const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : frozenSourceCommit(), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET, releaseKeyId: process.env.TAURI_CODEX_RELEASE_KEY_ID, releasePublicKey: process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY };
-    const result = mode === "preflight" ? await preflightPublisher(common) : mode === "stage" ? await stageRelease(common) : mode === "commit" ? await commitRelease(common) : null;
-    if (!result) throw new Error("usage: publish:release:oss -- <preflight|stage|commit> <version>");
+    const result = mode === "preflight" ? await preflightPublisher(common) : mode === "stage" ? await stageRelease(common) : mode === "snapshot" ? await snapshotRelease(common) : mode === "commit" ? await commitRelease(common) : mode === "confirm" ? await confirmRelease(common) : mode === "rollback" ? await rollbackRelease(common) : null;
+    if (!result) throw new Error("usage: publish:release:oss -- <preflight|stage|snapshot|commit|confirm|rollback> <version>");
     console.log(JSON.stringify(result, null, 2));
   } catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
 }

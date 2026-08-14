@@ -27,7 +27,7 @@ npm run bootstrap
 npm run build
 ```
 
-成功标志是 `.codex-build/build/0.1.2/windows-x64/tauri-codex.exe` 存在。
+成功标志是 `.codex-build/build/0.2.0/windows-x64/tauri-codex.exe` 存在。
 
 生成 NSIS x64 薄安装器与组件闭包：
 
@@ -36,7 +36,7 @@ npm run installer:build
 npm run installer:verify
 ```
 
-验证成功会输出 `verified: true`。当前候选 Installer、`manifest.json`、`bootstrap.json` 和 `components/` 位于 `.codex-build/releases/0.1.3/windows-x64/`。Installer 只负责安装稳定入口；首次启动再由 Launcher 下载并校验组件。兼容命令 `npm run app:bundle` 等价于 `npm run installer:build`。
+验证成功会输出 `verified: true`。当前候选 Installer、`manifest.json`、`bootstrap.json` 和 `components/` 位于 `.codex-build/releases/0.2.0/windows-x64/`。Installer 只负责安装稳定入口；首次启动再由 Launcher 下载并校验组件。兼容命令 `npm run app:bundle` 等价于 `npm run installer:build`。
 
 ## 一次完成
 
@@ -48,6 +48,8 @@ npm run build:release
 
 该命令只生成本机候选，不安装、不上传、不发布。已有候选可以单独运行 `npm run verify:release` 复核。修改前端、Rust 或正式文档后运行 `npm run test`，它会执行前端构建、Rust 格式/类型检查与定向单测，以及文档门禁。修改依赖时再运行 `npm run audit:dependencies`。
 
-## 自动触发
+## CI 与候选
 
-`.github/workflows/ci.yml` 在 Pull Request 和 `main` 推送时安装锁定依赖，执行依赖审计和 `npm test`。`.github/workflows/windows-release.yml` 支持推送形如 `v0.1.3` 的 tag，或在 GitHub Actions 页面手工运行并填写 `0.1.3`；它恢复构建缓存后先执行同一测试门禁，再运行 `build:release` 和 `verify:release`。Installer 首次发布 tag 会上传薄 Installer，普通 tag 复用该公开资产并只上传 manifest、Bootstrap 和组件。手工触发只保留 Actions artifact，Actions cache 不是发布资产。
+`.github/workflows/ci.yml` 在 Pull Request 和 `main` 推送时安装锁定依赖，执行依赖审计和 `npm test`。生产候选只通过 GitHub Actions 页面手工运行 `.github/workflows/windows-release.yml`：选择 `candidate`，填写版本 `0.2.0` 和准备发布的完整 40 位 source commit。该操作只构建、签名、复核一次，并保留 14 天的 frozen candidate artifact；它不写 OSS、不创建 tag，也不创建 GitHub Release。
+
+候选通过独立验收后，已获 Deployment 授权的执行者才可对同一 source commit 和 candidate run ID 运行 `publish`。该操作先验证 OSS 写入与匿名回读，再上传不可变 closure、保存旧 Bootstrap 精确快照，最后条件提交新 Bootstrap。公开 OSS 安装验收通过后运行 `finalize` 创建 tag 和只含 OSS 链接的 GitHub Release Notes。提交后验收失败时，在创建 tag 前用同一 candidate run ID 与 publish run ID 运行 `rollback`；它只在 Bootstrap 仍指向本候选时恢复快照，不删除已上传但未引用的不可变对象。

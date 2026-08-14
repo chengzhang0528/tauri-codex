@@ -36,7 +36,10 @@ Depends On:
 | `verify:release` | 对已有冻结候选重复验证，不重建同版本 | 只读 |
 | `publish:release:oss -- preflight <version>` | 用项目探针验证 OSS 凭据写入与匿名回读，不输出 Secret | 短暂创建并精确删除 probe object |
 | `publish:release:oss -- stage <version>` | 上传或复用全部不可变对象，并逐个匿名回读验证；不移动 Bootstrap | 改变 OSS 不可变对象 |
-| `publish:release:oss -- commit <version>` | 重新验证完整 OSS closure 后最后提交唯一 mutable Bootstrap | 改变 OSS Bootstrap |
+| `publish:release:oss -- snapshot <version>` | 保存当前 Bootstrap 原始 bytes、SHA-256 与 ETag，并绑定目标候选 | 写入候选目录内的忽略文件 |
+| `publish:release:oss -- commit <version>` | 重新验证完整 closure 与快照后，条件提交唯一 mutable Bootstrap | 改变 OSS Bootstrap |
+| `publish:release:oss -- confirm <version>` | 匿名回读不可变 closure 与 Bootstrap，确认与候选逐字节一致 | 只读 |
+| `publish:release:oss -- rollback <version>` | 仅当当前 Bootstrap 仍等于候选时，条件恢复快照并回读 | 改变 OSS Bootstrap |
 | `release:patch` | 计算下一 Manager patch；Installer 版本保持独立 | 修改版本源，仍不发布 |
 | `test:rust` / `test` | 运行 Development 白盒门禁 | 只写入忽略的构建缓存 |
 
@@ -61,8 +64,10 @@ GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHEN
 3. 最终 doctor 通过后才计算组件 identity 并生成 Ed25519 signed manifest；随后按需构建并签名 Installer，生成最终 signed Bootstrap，再写入 `candidate.json` 固定所有 bytes、size、SHA-256、key ID 和路径。
 4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
 5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
-6. 完整匿名回读 closure 后，`commit` 最后写 `bootstrap/windows-x64.json` 并再次匿名读取同 bytes。
-7. OSS closure 生效后，GitHub Workflow 创建 tag 对应 Release Notes，正文只含 OSS Installer/manifest 链接，不上传文件。
+6. `snapshot` 保存提交前 Bootstrap 的精确 bytes、SHA-256 与 ETag；首次 v2 发布允许从经结构校验的 schema v1 Bootstrap 条件迁移。
+7. 完整匿名回读 closure 后，`commit` 只在当前 Bootstrap 仍等于快照时写 `bootstrap/windows-x64.json`，并再次匿名读取同 bytes。
+8. 独立公开安装验收通过后，`finalize` 才创建 tag 和 Release Notes；正文只含 OSS Installer/manifest 链接，不上传文件。
+9. 提交后验收失败且 tag 尚未创建时，`rollback` 只在当前 Bootstrap 仍等于本候选时恢复快照；不可变对象保留为未引用对象，不覆盖或删除。
 
 任一步失败都不得改写冻结候选或移动 Bootstrap；重试复用同一 `candidate.json`。同版本 bytes 不一致必须换版本，不能覆盖。
 
@@ -78,7 +83,7 @@ GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHEN
 
 ## GitHub Workflow
 
-`windows-release.yml` 只接受受保护的 `workflow_dispatch`：`oss-preflight → build-once → oss-stage → oss-commit → github-release-notes`。Job 之间只传同一个短期 candidate artifact；只有 OSS closure 完整匿名回读并提交 Bootstrap 后，最后一个 Job 才创建 GitHub tag/Release Notes。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
+`windows-release.yml` 只接受受保护的 `workflow_dispatch`，并把同一冻结候选分成四种可恢复操作：`candidate` 只构建并保留 14 天 artifact；`publish` 通过 candidate run ID 下载该候选，执行 preflight、stage、snapshot 和 commit；`finalize` 在独立公开安装验收通过后再次确认 OSS identity，再创建 GitHub tag/Release Notes；`rollback` 通过 candidate run ID 与 publish run ID 条件恢复提交前快照。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
 
 本 Runbook 不构成 Deployment 授权。向 OSS 写对象、移动 Bootstrap 或公开 Release Notes 必须由单独授权的 Deployment 执行。
 
@@ -86,6 +91,7 @@ GitHub Actions 由 `TAURI_CODEX_AUTHENTICODE_PFX_BASE64` 与 `TAURI_CODEX_AUTHEN
 
 - 缺少生产 Ed25519 或 Authenticode identity：停止候选构建，不降级为 unsigned。
 - OSS preflight、上传或匿名回读失败：保留不可变对象供同候选重试，不提交 Bootstrap。
+- Bootstrap 提交后的公开安装验收失败：在 tag 创建前运行 `rollback`；若 Bootstrap 已被其他写入者改变，停止并人工判定，不做盲覆盖。
 - candidate metadata 与本地 bytes 不一致：停止并废弃该版本，不重建覆盖。
 - schema、platform、architecture、compatibility、签名、size、digest 或 object key 不一致：拒绝候选。
 - 不得改用 GitHub、npm registry 或其他 binary origin 绕过 OSS 故障。
