@@ -1,0 +1,7 @@
+interface:
+  display_name: "Client Application Development"
+  short_description: "Choose, package, release, and update clients safely"
+  default_prompt: "Use $client-application-development to select a client stack, build and publish installers, and design a two-step official update flow without disrupting users."
+
+policy:
+  allow_implicit_invocation: true

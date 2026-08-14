@@ -9,7 +9,7 @@ description: Use after align-solution-direction when producing or revising a Dev
 
 First use `../align-solution-direction/SKILL.md`. Carry its direction contract: outcome, boundary, this task's execution type, invariants, ownership, completion rule, and material open decisions. Do not reopen or reinterpret those decisions here. Return to alignment only when verified evidence makes the direction impossible or exposes a genuinely material choice. If alignment stops, do not create a coding-ready solution.
 
-Start with a compact review decision sheet that maps each approved outcome to current support, required change, owner, evidence, and any material open decision. Add UI, API, data, operations, security, migration, or other impact only when that dimension is actually affected. Do not enumerate empty layers or turn a review plan into a file-by-file coding recipe.
+Start with a compact review decision sheet that maps each approved outcome to current support, required change, user surface, owner, persistence impact, evidence, and any material open decision. Add UI, API, data, operations, security, migration, or other impact only when that dimension is actually affected. Do not enumerate empty layers or turn a review plan into a file-by-file coding recipe.
 
 Use this skill only for a requested solution or a controlled technical change under WF-0002. Do not invoke it for a change classified as normal by `WORKFLOW_CONTRACT.md`; those changes use the user request, targeted fact discovery, source, types and tests directly.
 
@@ -27,11 +27,12 @@ Read root `AGENTS.md`, `文档/TASK_CONTROL.md`, `文档/工作流/WORKFLOW_CONT
 
 Lead with one decision table. Each candidate capability must state:
 
-| Outcome / decision | Current support | Required change | Owner | Evidence | Open decision |
-|---|---|---|---|---|---|
+| Outcome / decision | Current support | Required change | User surface | Owner | Persistence impact | Evidence | Open decision |
+|---|---|---|---|---|---|---|---|
 
 - Describe only affected dimensions. For example, add a short UI/API/data/security/operations note when it changes the decision; do not require a fixed layer checklist for every outcome.
 - Group closely related surfaces and actions by business capability; do not repeat every component, field, endpoint, test class, or historical detail in the main plan.
+- State whether the outcome changes an existing frontend/client surface, needs a new user entrypoint, remains internal, or is unreachable. State `no persistence change`, `reuse existing state`, `schema migration`, or `new persisted state` instead of leaving data ownership implicit.
 - State the recommended order and no more than the prerequisite that affects a decision.
 - Separate “can start after approval” from “blocked until a product/ownership decision”.
 - State schema, migration, public-contract, operational, or compatibility impact only when the outcome reaches that boundary. Name concrete assets only when verified.
@@ -55,13 +56,14 @@ Include these sections in substance:
 7. Verification
 8. Open Questions and Non-Goals
 
-Use exact paths, routes, contracts, tables, jobs, and owners when verified. Separate verified facts from assumptions and inferences. For phased work, state prerequisites, this phase's stopping boundary, downstream handoff, and explicit exclusions.
+Use exact paths, routes, contracts, tables, jobs, and owners when verified. Separate confirmed requirements, verified facts, and working assumptions. Keep each working assumption visible and reversible; never promote it into an invariant, success criterion, non-goal, prohibition, ownership decision, compatibility promise, or stop condition. Explicit bounded delegation supplies authority only within that boundary; silence, repetition, or prior-plan inclusion does not. For phased work, state prerequisites, this phase's stopping boundary, downstream handoff, and explicit exclusions.
 
 ## Coding-ready gate
 
 Do not hand the plan to coding unless:
 
 - it preserves the direction contract without redefining its outcome, invariants, ownership, or completion rule;
+- every retained constraint identifies whether its authority is a confirmed requirement or a verified fact, and no working assumption is treated as mandatory;
 - the allowed change surface and prohibited dependencies are explicit;
 - critical behavior is grounded in source, measured state, or an authoritative contract;
 - success is observable through named UI actions, tests, APIs, CLI output, artifacts, or database checks;

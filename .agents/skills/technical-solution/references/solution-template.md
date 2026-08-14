@@ -20,10 +20,10 @@ State the recommended decision, scope, and whether the plan is ready to code.
 
 ## 3. Decision table
 
-| Outcome / decision | Current support | Required change | Owner | Evidence | Open decision |
-|---|---|---|---|---|---|
+| Outcome / decision | Current support | Required change | User surface | Owner | Persistence impact | Evidence | Open decision |
+|---|---|---|---|---|---|---|---|
 
-Use only the evidence needed to support each decision. Add UI, API, data/schema, security, operations, migration, or compatibility notes only for dimensions that the outcome actually affects; name concrete assets only when verified. Group related surfaces and actions.
+Use only the evidence needed to support each decision. For every outcome, state whether it changes an existing frontend/client surface, adds a user entrypoint, remains internal, or is unreachable, and whether it reuses state or changes persistence. Add API, data/schema, security, operations, migration, or compatibility notes only for dimensions that the outcome actually affects; name concrete assets only when verified. Group related surfaces and actions.
 
 Every unresolved product rule must become two or three labelled choices, with one marked recommended. Do not leave a reviewer with an open-ended “define/confirm rule” request.
 
@@ -35,7 +35,7 @@ Every unresolved product rule must become two or three labelled choices, with on
 
 ## 5. Evidence and verification
 
-- Key verified sources and material assumptions
+- Key confirmed requirements, verified sources, and material working assumptions
 - Scoped white-box evidence that satisfies the completion rule
 - SystemTest or Deployment task status only when the user requested or the workflow established it
 - Repository state, reported separately from Development completion
@@ -55,10 +55,11 @@ Add the following only after approval or an explicit request for implementation 
 
 ## 2. Facts and Sources
 
-| Type | Fact | Exact source/evidence |
+| Type | Requirement, fact, or assumption | Exact authority/evidence |
 |---|---|---|
-| Verified |  |  |
-| Assumption/inference |  | Why it is not yet verified |
+| Confirmed requirement |  | Exact user instruction, acceptance, correction, or bounded delegation |
+| Verified fact |  | Source, type, test, measurement, or routed formal owner |
+| Working assumption |  | Why it is non-material, reversible, and needed as a default |
 
 ## 3. Plan and Change Boundary
 
@@ -101,4 +102,4 @@ Keep only non-blocking questions here. List non-goals explicitly; move every blo
 
 ## Gate
 
-Before handoff, confirm the preserved direction contract, explicit boundary, grounded facts, direct constraints, observable criteria, stop conditions, concrete verification, and non-goals. When a correction changes the direction contract, rewrite all dependent sections and delete incompatible wording rather than appending an exception.
+Before handoff, confirm the preserved direction contract, explicit boundary, requirement provenance, grounded facts, direct constraints, observable criteria, stop conditions, concrete verification, and non-goals. Confirm that no working assumption has become mandatory through silence, repetition, or prior-plan inclusion. When a correction changes the direction contract, rewrite all dependent sections and delete incompatible wording rather than appending an exception.

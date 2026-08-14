@@ -1,0 +1,4 @@
+interface:
+  display_name: "Managed Client Capability"
+  short_description: "Build, package, release, and update capabilities"
+  default_prompt: "Use $develop-managed-client-capability to design, package, release, and update a bounded managed client capability with mature delivery and user-impact rules."

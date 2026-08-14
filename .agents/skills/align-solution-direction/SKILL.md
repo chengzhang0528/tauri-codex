@@ -35,6 +35,18 @@ Keep the contract compact and domain-independent:
 
 Do not fill missing sections with speculative detail. Do not enumerate empty technical layers. A downstream implementation concern becomes part of the direction only when it changes one of these fields.
 
+## Guard Requirement Authority
+
+Classify every input that could change the direction contract:
+
+- **Confirmed requirement**: an explicit user instruction, correction, acceptance, or bounded delegation. Only this class defines the desired outcome and hard requirements.
+- **Verified fact**: source, types, tests, measured behavior, or the routed formal owner establish the current state or feasibility. A fact may constrain a truthful solution but does not redefine the user's desired outcome.
+- **Working assumption**: an inference, recommendation, preference, or default that has neither authority above. Keep it visible and reversible at its first consequential use.
+
+Silence, repetition, prior-plan inclusion, and downstream copying do not confirm an assumption. Promote it only through explicit user acceptance, or reclassify it as a verified fact when evidence supports it; never blur those two authorities. If it changes the outcome, boundary, invariants, ownership, public or persisted commitments, completion rule, or an irreversible or external action, expose it as an open decision. If it affects only a reversible, non-material implementation choice, state the default and proceed within the confirmed boundary.
+
+Preserve this provenance across every revision and handoff. Do not turn a working assumption into an invariant, acceptance criterion, non-goal, prohibition, ownership decision, compatibility promise, or stop condition merely because an earlier artifact used it. For example, an inferred companion capability remains a suggestion, while a source-proven public consumer is a verified compatibility fact; explicit delegation lets the agent choose only within the delegated boundary.
+
 ## Learn From Corrections
 
 When the user corrects an answer or repeatedly rejects the same framing:
@@ -59,8 +71,13 @@ Test the proposed direction with these questions:
 5. Can an existing owner or mechanism satisfy the outcome with less permanent complexity?
 6. Would a downstream skill be able to add concrete detail without changing the outcome, boundary, invariants, ownership, or completion rule?
 7. Is a known future result being mistaken for an authorized task, or a finite candidate inventory being mistaken for a complete audit? Candidates remain untyped and uncommitted until the user explicitly starts them; completeness requires a declared audit scope.
+8. Can every user acceptance scenario be reached through a supported product entrypoint? Move internal fault injection to focused tests and remove obsolete or impossible scenarios.
+9. Are independently changing facts being compressed into one enum or behavior flag, or are new tables, APIs, caches, workers, containers, and UI states being proposed without a proven owner and consumer?
+10. Are scale, retention, concurrency, idempotency, recursion, recovery, compatibility, and remote-failure machinery supported by current evidence, or are they speculative operating cost?
 
 Prefer removal, reuse, deferral, or reassignment when they preserve the outcome with less lasting cost. Use external products and general best practices only as candidate generators, never as authority.
+
+Choose the fastest verification that covers the retained risk. Preserve a broader or slower verification path only when a real shared consumer, release promise, or failure boundary makes focused evidence insufficient.
 
 ## Decide and Respond
 
