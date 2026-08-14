@@ -86,10 +86,10 @@ Do not resolve assets by filename guesses, latest directory entries, or a mutabl
 
 ## 4. Install And Startup
 1. The Installer lays down the launcher, icons, shortcuts, registration, and required license/bootstrap material. It should not need network access unless the platform contract explicitly requires a prerequisite bootstrapper.
-2. After install finalization, start one launcher setup flow. Preserve one product registration, settings, and business state. Use same-version repair or higher-version in-place upgrade when the selected platform path supports it and the product compatibility contract permits it.
-3. Resolve the Installer/Launcher compatibility rule before designing self-update behavior:
-   - When the ProductContract promises in-place compatibility, or reinstall cannot preserve required user-owned state, ensure a compatible Launcher and Manager before starting an older client. Implement and test only the bridge or migration needed to uphold that promise.
-   - When compatibility is not promised and user-owned state survives Setup/reinstall, do not download, stage, execute, or activate an incompatible Installer from the running client. Report `setup-required`, direct the user to the newer official Setup, offer uninstall/reinstall only as a fallback, and leave the current installation and user data untouched.
+2. After install finalization, start one launcher setup flow. Preserve one product registration, settings, and business state. Use same-version repair or higher-version in-place Setup when the selected platform path supports it; replacing installer-owned files through that platform path does not create a historical application-protocol compatibility promise.
+3. Apply the no-historical-compatibility default before designing self-update behavior:
+   - Only when the ProductContract explicitly promises in-place compatibility, or the official replacement path cannot preserve and re-establish required user-owned state, ensure a compatible Launcher and Manager before starting an older client. Implement and test only the bounded bridge or migration needed for that exception.
+   - Otherwise treat the older Launcher protocol, schema, and private installer state as unsupported. Do not download, stage, execute, or activate an incompatible Installer from the running client. Report `setup-required`, direct the user to the newer official Setup, offer uninstall/reinstall only after normal Setup/upgrade fails, and leave the current installation and user data untouched. Repair an unreachable Setup or misplaced state at its owner; neither defect creates an implicit compatibility promise.
 4. An externally run newer Setup may install the new Launcher. Before that Launcher starts an existing Manager, compare the Manager with the Launcher's compiled minimum version; when incompatible, enter the normal setup/bootstrap flow and prepare a compatible release. This is a startup admission check, not a historical compatibility bridge.
 5. The launcher reads the selected release manifest, probes components, and reuses eligible system or private-cache candidates. A successful probe must be observable as reused/skipped and must not copy, upgrade, edit, or change global PATH for a system component.
 6. Missing or insufficient components are fetched from the configured distribution endpoint. A required component that cannot be verified or doctored must prevent `ready`.
@@ -145,8 +145,8 @@ Installer and Launcher must not read or migrate product registrations, workspace
 - Installer objects are immutable and published once. A same-version retry must read back and prove identical size/digest; it must never overwrite.
 - The bootstrap update is last. Before changing it, verify every referenced installer, manifest, component, digest, schema, and doctor result through the public read path.
 - Keep OSS publisher admission, immutable upload/read-back, and Bootstrap commit as distinct workflow jobs or modes with explicit dependencies. Do not put the credential check after publication.
-- If a new manifest schema or launcher contract is not understood by the current launcher, follow the resolved compatibility rule: either publish the explicitly promised bridge or make the running client stop at `setup-required` until the user runs the newer official Setup.
-- Keep only compatibility required by an explicit product promise or state-preservation need. Do not infer historical protocol, schema, rollback, or private-state migration from the existence of already published launchers.
+- If a new manifest schema or launcher contract is not understood by the current launcher, use the default replacement path: make the running client stop at `setup-required` until the user runs the newer official Setup. Publish a bridge only for an explicit in-place promise or required user-owned state that Setup/reinstall cannot preserve and re-establish.
+- Default to no historical protocol, schema, rollback, or private-state migration. Do not infer compatibility from already published launchers, an existing update channel, or the absence of a separate declaration that old versions are unsupported.
 
 ### Build-graph gates
 Treat a split Launcher/Manager application as a multi-entry build, not just a source-code split:
@@ -167,7 +167,7 @@ Use an exact public asset, not a worktree binary:
 1. Verify public OSS object metadata, size, SHA-256, platform, architecture, and signing/provenance.
 2. Install on a clean supported machine or isolated profile; confirm launcher starts and creates the expected shortcut/registration.
 3. Confirm the launcher can bootstrap a release using the deployment-configured public endpoint.
-4. Exercise the contract-selected Installer evolution path. For promised in-place compatibility, repeat the same Installer and then run a higher Installer without losing registration or user data. Otherwise prove the running client stops at `setup-required`, external Setup or fallback reinstall preserves user-owned state, and no incompatible partial mutation occurs.
+4. Exercise the Installer evolution path. For an explicit in-place compatibility promise, repeat the same Installer and then run a higher Installer without losing registration or user data. Otherwise prove the running client stops at `setup-required`, normal external Setup succeeds, fallback uninstall/reinstall remains available, the complete required state is restored, and no incompatible partial mutation occurs.
 5. Test both eligible and missing system-component cases; assert reuse versus download.
 6. Corrupt a staged asset or doctor result; assert `current` remains runnable and no bad release becomes ready.
 7. Stage an update while work is active; assert waiting-for-drain and no forced interruption.
