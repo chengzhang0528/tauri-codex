@@ -96,15 +96,7 @@ function toolchainEnvironment() {
   return { env, rustup };
 }
 
-function findSignTool() {
-  if (process.env.TAURI_CODEX_SIGNTOOL && existsSync(process.env.TAURI_CODEX_SIGNTOOL)) return process.env.TAURI_CODEX_SIGNTOOL;
-  const result = spawnSync("where.exe", ["signtool.exe"], { encoding: "utf8", windowsHide: true });
-  const found = result.status === 0 ? result.stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) : undefined;
-  if (!found) fail("未找到 signtool.exe。");
-  return found;
-}
-
-function verifyAuthenticode(filePath) { run(findSignTool(), ["verify", "/pa", "/all", filePath]); }
+function verifyAuthenticode(filePath) { run(managerSource, ["--verify-authenticode", filePath]); }
 function filesBelow(root) {
   const files = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {

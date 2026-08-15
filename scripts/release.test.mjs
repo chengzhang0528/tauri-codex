@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
 import test from "node:test";
 import { selfUseEnvelope, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
 import { nextPatchVersion, replaceVersion } from "./release.mjs";
@@ -75,6 +74,9 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.ok(pipeline.indexOf("doctorFinalComponentArchives(managerArchive, codexArchive);") < pipeline.indexOf("const payload = {"));
   assert.match(pipeline, /tauri-codex-manager\.exe"\), \["--runtime-check"\]/);
   assert.match(pipeline, /codexEntry, "--version"/);
+  assert.match(pipeline, /managerSource, \["--verify-authenticode", filePath\]/);
+  assert.doesNotMatch(pipeline, /signtool|findSignTool/i);
+  assert.doesNotMatch(pipeline, /Get-AuthenticodeSignature|Microsoft\.PowerShell\.Security/);
   assert.doesNotMatch(pipeline, /probePublishedInstaller\(\)[\s\S]{0,800}catch\s*\{/);
   assert.match(managerMain, /compile_error!/);
 });

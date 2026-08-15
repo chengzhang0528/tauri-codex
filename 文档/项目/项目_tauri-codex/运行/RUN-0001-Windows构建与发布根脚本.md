@@ -45,7 +45,7 @@ Depends On:
 
 ## self-use 输入与凭据
 
-self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/public key 或 timestamp URL。Windows SDK `signtool.exe` 仅用于验证 Codex、Node 与 WebView2Loader 已有的上游 Authenticode，不签名 tauri-codex 自有文件。
+self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/public key 或 timestamp URL。构建脚本调用已构建 Manager 内的 Windows WinVerifyTrust 校验 Codex、Node 与 WebView2Loader 已有的上游 Authenticode，不要求 `signtool.exe` 或 PowerShell Security module，也不签名 tauri-codex 自有文件。
 
 只有 `publish`、`finalize` 与 `rollback` 的 OSS 操作使用 GitHub `oss-release` environment；写入操作要求 `ALIYUN_OSS_ACCESS_KEY_ID` 和 `ALIYUN_OSS_ACCESS_KEY_SECRET`。候选构建不进入该 environment，不读取 OSS 写凭据。所有 Secret 都不得写入仓库、artifact 或日志。
 

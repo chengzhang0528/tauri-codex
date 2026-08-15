@@ -37,6 +37,10 @@ pub fn validate_installer_bootstrap() -> Result<(), String> {
     broker::validate_installer_bootstrap()
 }
 
+pub fn verify_release_authenticode(path: &std::path::Path) -> Result<(), String> {
+    health::verify_authenticode(path)
+}
+
 pub fn current_release_path(root: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
     activation::current_release_path(root)
 }

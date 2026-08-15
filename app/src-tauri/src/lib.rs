@@ -41,9 +41,40 @@ where
     let _ = app.emit_to("main", &event, payload);
 }
 
+fn authenticode_verification_path(
+    args: &[std::ffi::OsString],
+) -> Result<Option<std::path::PathBuf>, String> {
+    if args.first().and_then(|arg| arg.to_str()) != Some("--verify-authenticode") {
+        return Ok(None);
+    }
+    if args.len() != 2 {
+        return Err("--verify-authenticode 必须且只能接收一个绝对路径".to_string());
+    }
+    let path = std::path::PathBuf::from(&args[1]);
+    if !path.is_absolute() {
+        return Err("--verify-authenticode 只接受绝对路径".to_string());
+    }
+    Ok(Some(path))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run_manager() {
-    match std::env::args().nth(1).as_deref() {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    match authenticode_verification_path(&args) {
+        Ok(Some(path)) => {
+            if let Err(error) = delivery::verify_release_authenticode(&path) {
+                eprintln!("Authenticode verification failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("Authenticode verification failed: {error}");
+            std::process::exit(1);
+        }
+    }
+    match args.first().and_then(|arg| arg.to_str()) {
         Some("--session-host") => {
             if let Err(error) = host::run_from_stdin() {
                 eprintln!("Session Host failed: {error}");
@@ -205,5 +236,41 @@ mod tests {
         assert!(!source.contains("WebviewWindowBuilder"));
         assert!(!source.contains("WebviewUrl::App"));
         assert!(source.contains("--session-host"));
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::authenticode_verification_path;
+    use std::ffi::OsString;
+
+    #[test]
+    fn authenticode_verification_requires_one_absolute_path() {
+        let path = std::env::current_dir().unwrap().join("signed.exe");
+        assert_eq!(
+            authenticode_verification_path(&[
+                OsString::from("--verify-authenticode"),
+                path.clone().into_os_string(),
+            ]),
+            Ok(Some(path))
+        );
+        assert!(
+            authenticode_verification_path(&[OsString::from("--verify-authenticode")])
+                .unwrap_err()
+                .contains("一个绝对路径")
+        );
+        assert!(authenticode_verification_path(&[
+            OsString::from("--verify-authenticode"),
+            OsString::from("signed.exe"),
+        ])
+        .unwrap_err()
+        .contains("绝对路径"));
+        assert!(authenticode_verification_path(&[
+            OsString::from("--verify-authenticode"),
+            OsString::from("C:\\signed.exe"),
+            OsString::from("unexpected"),
+        ])
+        .unwrap_err()
+        .contains("一个绝对路径"));
     }
 }
