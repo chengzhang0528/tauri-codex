@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "keyId": "development-rfc8032",
+  "schemaVersion": 3,
+  "releaseMode": "self-use",
   "payload": {
     "product": "tauri-codex",
     "platform": "windows",
@@ -13,9 +13,8 @@
         "objectKey": "releases/0.2.0/windows-x64/manifest.json",
         "size": 1,
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "provenance": "ed25519"
+        "provenance": "self-use+sha256"
       }
     }
-  },
-  "signature": "N5oLI+O08Dcd3aPJwNWmyw1zc0uGG2EVKBB9T/2aEO4XVaEUthVlKzuKDyLb/ccBFqzH1pskHycn5pe6VA5fBw=="
+  }
 }

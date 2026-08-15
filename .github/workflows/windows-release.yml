@@ -89,12 +89,11 @@ jobs:
           "source-commit=$sourceCommit" >> $env:GITHUB_OUTPUT
 
   candidate-build:
-    name: Build and verify one signed Windows x64 candidate
+    name: Build and verify one self-use Windows x64 candidate
     if: inputs.operation == 'candidate'
     needs: [resolve]
     runs-on: windows-latest
     timeout-minutes: 60
-    environment: oss-release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,27 +122,6 @@ jobs:
         shell: msys2 {0}
         run: echo "TAURI_MINGW_BIN=$(cygpath -w /ucrt64/bin)" >> "$GITHUB_ENV"
 
-      - name: Import ephemeral Authenticode identity
-        shell: pwsh
-        env:
-          TAURI_CODEX_AUTHENTICODE_PFX_BASE64: ${{ secrets.TAURI_CODEX_AUTHENTICODE_PFX_BASE64 }}
-          TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD }}
-        run: |
-          if (-not $env:TAURI_CODEX_AUTHENTICODE_PFX_BASE64 -or -not $env:TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD) {
-            throw "Authenticode PFX identity is required"
-          }
-          New-Item -ItemType Directory -Force .codex-build | Out-Null
-          $pfx = Join-Path $PWD '.codex-build/signing.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:TAURI_CODEX_AUTHENTICODE_PFX_BASE64))
-          try {
-            $password = ConvertTo-SecureString $env:TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD -AsPlainText -Force
-            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password -Exportable:$false
-            if (-not $certificate.Thumbprint) { throw "PFX did not import a signing certificate" }
-            "TAURI_CODEX_AUTHENTICODE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
-          } finally {
-            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
-          }
-
       - name: Bootstrap locked build inputs
         shell: pwsh
         run: npm run bootstrap
@@ -158,10 +136,6 @@ jobs:
         shell: pwsh
         env:
           TAURI_RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
-          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
-          TAURI_CODEX_RELEASE_PRIVATE_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PRIVATE_KEY }}
-          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
-          TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL: ${{ secrets.TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL }}
         run: npm run build:release
 
       - name: Upload frozen candidate
@@ -221,16 +195,16 @@ jobs:
 
       - name: Upload and anonymously read back immutable objects
         shell: pwsh
-        env: &oss-publisher
+        env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-          TAURI_CODEX_RELEASE_KEY_ID: ${{ secrets.TAURI_CODEX_RELEASE_KEY_ID }}
-          TAURI_CODEX_RELEASE_PUBLIC_KEY: ${{ secrets.TAURI_CODEX_RELEASE_PUBLIC_KEY }}
         run: npm run publish:release:oss -- stage ${{ needs.resolve.outputs.version }}
 
       - name: Snapshot the exact previous Bootstrap
         shell: pwsh
-        env: *oss-publisher
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
         run: npm run publish:release:oss -- snapshot ${{ needs.resolve.outputs.version }}
 
       - name: Upload rollback snapshot
@@ -272,7 +246,9 @@ jobs:
 
       - name: Conditionally commit and read back Bootstrap
         shell: pwsh
-        env: *oss-publisher
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
         run: |
           npm run publish:release:oss -- commit ${{ needs.resolve.outputs.version }}
           npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
@@ -306,7 +282,9 @@ jobs:
 
       - name: Confirm public OSS candidate identity
         shell: pwsh
-        env: *oss-publisher
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
         run: npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
 
       - name: Create OSS-only GitHub Release Notes
@@ -319,7 +297,7 @@ jobs:
             ## Windows x64 downloads
 
             - [Installer](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/installers/${{ needs.resolve.outputs.installer-version }}/windows-x64/tauri-codex_${{ needs.resolve.outputs.installer-version }}_x64-setup.exe)
-            - [Signed release manifest](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/releases/${{ needs.resolve.outputs.version }}/windows-x64/manifest.json)
+            - [Self-use release manifest](https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/releases/${{ needs.resolve.outputs.version }}/windows-x64/manifest.json)
 
   rollback-bootstrap:
     name: Conditionally restore the previous OSS Bootstrap
@@ -355,5 +333,7 @@ jobs:
 
       - name: Restore exact previous Bootstrap only if candidate is still current
         shell: pwsh
-        env: *oss-publisher
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
         run: npm run publish:release:oss -- rollback ${{ needs.resolve.outputs.version }}

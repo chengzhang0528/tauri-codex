@@ -34,7 +34,7 @@ pub fn doctor_manager(root: &Path, system_node: &Path) -> Result<(), String> {
         &root.join("WebView2Loader.dll"),
         "Manager WebView2 运行时依赖",
     )?;
-    verify_authenticode_tree(root)?;
+    verify_authenticode(&root.join("WebView2Loader.dll"))?;
     let mut command = job::background_command(root.join("tauri-codex-manager.exe"));
     command
         .arg("--runtime-check")

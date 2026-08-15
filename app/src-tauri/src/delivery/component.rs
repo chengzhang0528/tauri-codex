@@ -127,7 +127,7 @@ fn verify_release(manifest: &Manifest, release: &Path, state: &str) -> Result<()
         &fs::read(release.join("release.json")).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("{state} manifest 损坏：{error}"))?;
-    super::contract::verify_envelope(&stored)?;
+    super::contract::verify_release_envelope(&stored)?;
     if stored != *manifest || !release.join(".ready").is_file() {
         return Err(format!("{state} release manifest 或 ready 标记不匹配"));
     }

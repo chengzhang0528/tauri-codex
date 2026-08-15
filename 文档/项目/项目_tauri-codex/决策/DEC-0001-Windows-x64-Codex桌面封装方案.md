@@ -5,7 +5,7 @@ Kind: Decision
 Decision ID: DEC-0001
 Scope: tauri-codex / 首个交付技术方向
 Owner: 项目维护者
-Updated: 2026-08-14
+Updated: 2026-08-15
 Depends On:
 - ../产品契约.md
 
@@ -35,7 +35,7 @@ Depends On:
 | 输出压力 | Session Host 和对应嵌入 xterm 之间使用有界队列与逐批渲染确认；过载只影响对应会话 | Tauri Rust runtime 与 xterm | 防止终端输出洪泛 |
 | 模型实例 | 每个 Responses API 实例保存名称、URL、API Key 和唯一默认标记，并生成不含 model 的独立 `<profile>.config.toml` | 配置层与 Codex | 用户决定与 Codex 0.134+ 配置规则 |
 | 配置隔离 | 所有 Codex 进程显式使用同一个应用专属 `CODEX_HOME` | Tauri Rust runtime | 用户决定与官方能力 |
-| 更新 | 固定项目 OSS 是唯一 binary origin；Launcher/Broker 独占 signed manifest、下载、校验、事务、staging、激活与 forward-repair | Launcher/Updater | 用户决定与客户端交付边界 |
+| 更新 | 固定项目 OSS 是唯一 binary origin；Launcher/Broker 独占显式 self-use manifest、下载、校验、事务、staging、激活与 forward-repair | Launcher/Updater | 用户决定与客户端交付边界 |
 
 ## 运行结构
 
@@ -57,15 +57,15 @@ flowchart LR
   P1 --> Home["应用专属 CODEX_HOME"]
   P2 --> Home
   Desktop -. "Named Pipe 更新意图" .-> Launcher
-  Launcher --> Releases["OSS signed release closure"]
+  Launcher --> Releases["OSS self-use release closure"]
 ```
 
 ## 职责边界
 
 ### NSIS Setup 与 Launcher
 
-- NSIS 只安装稳定 Launcher、图标、signed Bootstrap seed 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只从固定 `shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/` OSS 根读取精确 object key。
-- Launcher 读取 Ed25519 signed Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定 OSS object key 下载，校验 size/SHA-256/签名、解包并 doctor 通过后才进入 staging。
+- NSIS 只安装稳定 Launcher、图标、self-use Bootstrap seed 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只从固定 `shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/` OSS 根读取精确 object key。
+- Launcher 只接受 schema v3、`releaseMode: self-use` 的 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定 OSS object key 下载，校验 size/SHA-256/角色限定 provenance、解包并 doctor 通过后才进入 staging。自有 Launcher、Manager、Installer 允许 unsigned；Codex、Node 与 WebView2Loader 仍校验上游 Authenticode。
 - 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理；准备完成后启动 Tauri Manager。
 - Launcher 在 Manager 存活期间保持为隐藏 Broker，通过当前用户受限 Named Pipe 接受更新意图；Manager 不持有组件文件或安装行为。
 
@@ -98,8 +98,8 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 - Manager 只有一个动态主按钮。手动 `check` 是只读操作；`available` 后同一按钮提交 `prepare`；`staged` 后且活动会话为零时提交 `activate`。
 - Launcher 启动后及运行期间约每六小时自动检查，并可自动准备兼容的完整 release；发现新版 Installer/Launcher 时只进入 `setup-required`。自动路径不激活、不退出 Manager、不结束活动 TUI。
 - Manager、Codex 与 Node fallback 由同一个 manifest 共同 stage，不存在 Codex 独立 `current`、npm view/install 或单独版本切换。
-- Launcher/Installer 更新由用户在应用外运行已完成 Authenticode 验证的新版 NSIS Setup；运行中的 Launcher/Manager 不下载、暂存或执行 Setup。普通 release 更新由 Launcher 原子切换；激活后健康失败只 forward-repair 当前目标，不自动回滚。
-- schema v2 是破坏性切换，不提供 schema v1 或旧 Launcher 桥接；旧安装必须重新运行新版 Installer。
+- Launcher/Installer 更新由用户在应用外运行新版 self-use NSIS Setup；运行中的 Launcher/Manager 不下载、暂存或执行 Setup。普通 release 更新由 Launcher 原子切换；激活后健康失败只 forward-repair 当前目标，不自动回滚。
+- schema v3 self-use 是破坏性切换，不提供 schema v1/v2 或旧 Launcher 桥接；旧安装必须重新运行新版 Installer。
 
 ## 实施准入
 
@@ -129,6 +129,6 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 ## 发布与官方文档获取边界
 
-- 桌面发布先验证 `oss-release` 环境、凭据名称、项目 OSS 写入和匿名回读；冻结并完成 Authenticode/Ed25519 签名后，将同一不可变闭包上传并完整匿名回读到项目 OSS 前缀，最后提交 OSS Bootstrap。GitHub tag/Release Notes 只能在 OSS closure 可读后创建，下载链接指向 OSS 且不得上传二进制。前置失败不得公开版本，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
+- 桌面 self-use 发布先冻结 source commit、schema/mode、对象 identity，并验证 Codex、Node 与 WebView2Loader 的上游 Authenticode；随后验证 `oss-release` 环境、项目 OSS 写入和匿名回读，将同一不可变闭包上传并完整匿名回读到项目 OSS 前缀，最后提交 OSS Bootstrap。GitHub tag/Release Notes 只能在 OSS closure 可读后创建，下载链接指向 OSS 且不得上传二进制。前置失败不得公开版本，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
 - 官方 Codex 文档查询使用工作区 skill [official-codex-docs](../../../../.agents/skills/official-codex-docs/SKILL.md)，保留 `developers.openai.com` 官方 URL；Windows helper 依次使用显式 `CODEX_DOCS_PROXY`、`localhost:1080`、`127.0.0.1:1080`，最后直连 HTTPS。
 - 该代理只用于开发资料抓取，不注入应用、Codex、更新器或用户会话。

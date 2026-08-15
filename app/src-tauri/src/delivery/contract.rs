@@ -1,29 +1,34 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const OSS_ROOT: &str =
     "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 pub const BOOTSTRAP_KEY: &str = "bootstrap/windows-x64.json";
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 pub const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const SELF_USE_PROVENANCE: &str = "unsigned-self-use+sha256";
+pub const UPSTREAM_PROVENANCE: &str = "upstream-authenticode+sha256";
+pub const METADATA_PROVENANCE: &str = "self-use+sha256";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReleaseMode {
+    SelfUse,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
-pub struct SignedEnvelope<T> {
+pub struct ReleaseEnvelope<T> {
     pub schema_version: u32,
-    pub key_id: String,
+    pub release_mode: ReleaseMode,
     pub payload: T,
-    pub signature: String,
 }
 
-pub type Bootstrap = SignedEnvelope<BootstrapPayload>;
-pub type Manifest = SignedEnvelope<ManifestPayload>;
+pub type Bootstrap = ReleaseEnvelope<BootstrapPayload>;
+pub type Manifest = ReleaseEnvelope<ManifestPayload>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -180,21 +185,21 @@ pub struct UpdateResult {
 }
 
 pub fn validate_bootstrap(bootstrap: &Bootstrap) -> Result<(), String> {
-    verify_envelope(bootstrap)?;
+    verify_release_envelope(bootstrap)?;
     let payload = &bootstrap.payload;
     if bootstrap.schema_version != SCHEMA_VERSION
         || payload.product != "tauri-codex"
         || payload.platform != "windows"
         || payload.architecture != "x86_64"
     {
-        return Err("signed Bootstrap 与当前 Windows x64 Launcher 不兼容".to_string());
+        return Err("self-use Bootstrap 与当前 Windows x64 Launcher 不兼容".to_string());
     }
     validate_version(&payload.minimum_launcher_version)?;
     if let Some(installer) = &payload.installer {
         validate_version(&installer.version)?;
         validate_artifact(&installer.artifact, MAX_COMPONENT_BYTES)?;
-        if installer.artifact.provenance != "authenticode+ed25519" {
-            return Err("Installer artifact provenance 不满足身份要求".to_string());
+        if installer.artifact.provenance != SELF_USE_PROVENANCE {
+            return Err("Installer artifact provenance 不满足 self-use 策略".to_string());
         }
         validate_prefix(
             &installer.artifact.object_key,
@@ -203,6 +208,9 @@ pub fn validate_bootstrap(bootstrap: &Bootstrap) -> Result<(), String> {
     }
     validate_version(&payload.release.version)?;
     validate_artifact(&payload.release.manifest, MAX_MANIFEST_BYTES)?;
+    if payload.release.manifest.provenance != METADATA_PROVENANCE {
+        return Err("release manifest provenance 不满足 self-use 策略".to_string());
+    }
     if payload.release.manifest.object_key
         != format!(
             "releases/{}/windows-x64/manifest.json",
@@ -215,7 +223,7 @@ pub fn validate_bootstrap(bootstrap: &Bootstrap) -> Result<(), String> {
 }
 
 pub fn validate_manifest(manifest: &Manifest, bootstrap: &BootstrapPayload) -> Result<(), String> {
-    verify_envelope(manifest)?;
+    verify_release_envelope(manifest)?;
     let payload = &manifest.payload;
     if manifest.schema_version != SCHEMA_VERSION
         || payload.product != "tauri-codex"
@@ -261,8 +269,12 @@ pub fn validate_manifest(manifest: &Manifest, bootstrap: &BootstrapPayload) -> R
         {
             return Err(format!("{} 安装路径不安全", component.id.as_str()));
         }
+        let expected_provenance = match component.id {
+            ComponentId::Manager => SELF_USE_PROVENANCE,
+            ComponentId::Codex | ComponentId::Node => UPSTREAM_PROVENANCE,
+        };
         if component.provenance != component.artifact.provenance
-            || component.provenance != "authenticode+ed25519"
+            || component.provenance != expected_provenance
         {
             return Err(format!(
                 "{} provenance 不满足发布身份要求",
@@ -319,41 +331,26 @@ pub fn validate_manifest(manifest: &Manifest, bootstrap: &BootstrapPayload) -> R
     Ok(())
 }
 
-pub fn verify_envelope<T>(envelope: &SignedEnvelope<T>) -> Result<(), String>
-where
-    T: Serialize,
-{
+pub fn verify_release_envelope<T>(envelope: &ReleaseEnvelope<T>) -> Result<(), String> {
     if envelope.schema_version != SCHEMA_VERSION {
         return Err(format!(
-            "signed envelope schema {} 不受支持",
+            "release envelope schema {} 不受支持",
             envelope.schema_version
         ));
     }
-    let key_id = configured_key_id()?;
-    if envelope.key_id != key_id {
-        return Err(format!("签名 keyId {} 不受信任", envelope.key_id));
+    if envelope.release_mode != ReleaseMode::SelfUse {
+        return Err("release envelope 不是 self-use 模式".to_string());
     }
-    let public_key = configured_public_key()?;
-    let signature = STANDARD
-        .decode(envelope.signature.as_bytes())
-        .map_err(|error| format!("Ed25519 signature 不是 base64：{error}"))?;
-    let signature = Signature::from_slice(&signature)
-        .map_err(|error| format!("Ed25519 signature 长度错误：{error}"))?;
-    let key = VerifyingKey::from_bytes(&public_key)
-        .map_err(|error| format!("Ed25519 public key 无效：{error}"))?;
-    let payload = serde_json::to_value(&envelope.payload).map_err(|error| error.to_string())?;
-    let bytes = canonical_json(&payload);
-    key.verify(&bytes, &signature)
-        .map_err(|_| "Ed25519 signature 校验失败".to_string())
+    Ok(())
 }
 
-pub fn parse_signed<T: DeserializeOwned + Serialize>(
+pub fn parse_release<T: DeserializeOwned>(
     bytes: &[u8],
     label: &str,
-) -> Result<SignedEnvelope<T>, String> {
-    let envelope: SignedEnvelope<T> =
+) -> Result<ReleaseEnvelope<T>, String> {
+    let envelope: ReleaseEnvelope<T> =
         serde_json::from_slice(bytes).map_err(|error| format!("{label} 无法解析：{error}"))?;
-    verify_envelope(&envelope)?;
+    verify_release_envelope(&envelope)?;
     Ok(envelope)
 }
 
@@ -433,76 +430,6 @@ pub fn newer(candidate: &str, current: &str) -> Result<bool, String> {
     )
 }
 
-fn configured_key_id() -> Result<String, String> {
-    if let Some(value) = option_env!("TAURI_CODEX_RELEASE_KEY_ID") {
-        return Ok(value.to_string());
-    }
-    if cfg!(any(test, debug_assertions)) {
-        return Ok("development-rfc8032".to_string());
-    }
-    Err("未配置 TAURI_CODEX_RELEASE_KEY_ID，拒绝验证发布签名".to_string())
-}
-
-fn configured_public_key() -> Result<[u8; 32], String> {
-    let encoded = option_env!("TAURI_CODEX_RELEASE_PUBLIC_KEY").unwrap_or(
-        if cfg!(any(test, debug_assertions)) {
-            "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
-        } else {
-            ""
-        },
-    );
-    let compact = encoded.to_string();
-    if compact.is_empty() {
-        return Err("未配置 TAURI_CODEX_RELEASE_PUBLIC_KEY，拒绝验证发布签名".to_string());
-    }
-    let bytes = STANDARD
-        .decode(compact.as_bytes())
-        .map_err(|error| format!("Ed25519 public key 不是 base64：{error}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "Ed25519 public key 必须是 32 bytes".to_string())
-}
-
-pub fn canonical_json(value: &Value) -> Vec<u8> {
-    fn write(value: &Value, output: &mut String) {
-        match value {
-            Value::Null => output.push_str("null"),
-            Value::Bool(value) => output.push_str(if *value { "true" } else { "false" }),
-            Value::Number(value) => output.push_str(&value.to_string()),
-            Value::String(value) => {
-                output.push_str(&serde_json::to_string(value).expect("string serialization"))
-            }
-            Value::Array(values) => {
-                output.push('[');
-                for (index, item) in values.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    write(item, output);
-                }
-                output.push(']');
-            }
-            Value::Object(values) => {
-                output.push('{');
-                let mut keys = values.keys().collect::<Vec<_>>();
-                keys.sort();
-                for (index, key) in keys.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    output.push_str(&serde_json::to_string(key).expect("key serialization"));
-                    output.push(':');
-                    write(&values[*key], output);
-                }
-                output.push('}');
-            }
-        }
-    }
-    let mut output = String::new();
-    write(value, &mut output);
-    output.into_bytes()
-}
-
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -510,21 +437,11 @@ pub fn digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_url, canonical_json, newer, validate_manifest, validate_object_key,
-        verify_envelope, Artifact, BootstrapPayload, Component, ComponentId, ManifestPayload,
-        ReleaseRef, SignedEnvelope,
+        artifact_url, newer, validate_manifest, validate_object_key, verify_release_envelope,
+        Artifact, BootstrapPayload, Component, ComponentId, ManifestPayload, ReleaseEnvelope,
+        ReleaseMode, ReleaseRef, METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_PROVENANCE,
     };
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
-
-    #[test]
-    fn canonical_json_sorts_object_keys() {
-        assert_eq!(
-            canonical_json(&json!({"b": 2, "a": 1})),
-            br#"{"a":1,"b":2}"#
-        );
-    }
 
     #[test]
     fn object_url_is_fixed_to_oss() {
@@ -542,7 +459,7 @@ mod tests {
         assert!(newer("0.2.1-beta.1", "0.2.0").is_err());
     }
 
-    fn signed_bootstrap() -> SignedEnvelope<BootstrapPayload> {
+    fn self_use_bootstrap() -> ReleaseEnvelope<BootstrapPayload> {
         let payload = BootstrapPayload {
             product: "tauri-codex".to_string(),
             platform: "windows".to_string(),
@@ -555,36 +472,22 @@ mod tests {
                     object_key: "releases/0.2.0/windows-x64/manifest.json".to_string(),
                     size: 128,
                     sha256: "a".repeat(64),
-                    provenance: "ed25519".to_string(),
+                    provenance: METADATA_PROVENANCE.to_string(),
                 },
             },
         };
-        let key = SigningKey::from_bytes(&[
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-            0x1c, 0xae, 0x7f, 0x60,
-        ]);
-        let bytes = canonical_json(&serde_json::to_value(&payload).unwrap());
-        SignedEnvelope {
-            schema_version: 2,
-            key_id: "development-rfc8032".to_string(),
+        ReleaseEnvelope {
+            schema_version: 3,
+            release_mode: ReleaseMode::SelfUse,
             payload,
-            signature: STANDARD.encode(key.sign(&bytes).to_bytes()),
         }
     }
 
-    fn signed_manifest(payload: ManifestPayload) -> SignedEnvelope<ManifestPayload> {
-        let key = SigningKey::from_bytes(&[
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-            0x1c, 0xae, 0x7f, 0x60,
-        ]);
-        let bytes = canonical_json(&serde_json::to_value(&payload).unwrap());
-        SignedEnvelope {
-            schema_version: 2,
-            key_id: "development-rfc8032".to_string(),
+    fn self_use_manifest(payload: ManifestPayload) -> ReleaseEnvelope<ManifestPayload> {
+        ReleaseEnvelope {
+            schema_version: 3,
+            release_mode: ReleaseMode::SelfUse,
             payload,
-            signature: STANDARD.encode(key.sign(&bytes).to_bytes()),
         }
     }
 
@@ -593,6 +496,10 @@ mod tests {
             ComponentId::Manager => ("0.2.0", "archive", "zip", "manager", "manager.zip"),
             ComponentId::Codex => ("0.147.0", "archive", "zip", "codex", "codex.zip"),
             ComponentId::Node => ("24.19.0", "system", "msi", "system", "node.msi"),
+        };
+        let provenance = match &id {
+            ComponentId::Manager => SELF_USE_PROVENANCE,
+            ComponentId::Codex | ComponentId::Node => UPSTREAM_PROVENANCE,
         };
         Component {
             id,
@@ -604,20 +511,24 @@ mod tests {
                 object_key: format!("releases/0.2.0/windows-x64/components/{name}"),
                 size: 1,
                 sha256: "a".repeat(64),
-                provenance: "authenticode+ed25519".to_string(),
+                provenance: provenance.to_string(),
             },
             install_path: install_path.to_string(),
-            provenance: "authenticode+ed25519".to_string(),
+            provenance: provenance.to_string(),
             installed_tree_sha256: tree,
         }
     }
 
     #[test]
-    fn ed25519_envelope_accepts_exact_payload_and_rejects_mutation() {
-        let mut envelope = signed_bootstrap();
-        verify_envelope(&envelope).expect("valid test envelope");
-        envelope.payload.release.version = "0.2.1".to_string();
-        assert!(verify_envelope(&envelope).is_err());
+    fn self_use_envelope_is_explicit_and_schema_bound() {
+        let mut envelope = self_use_bootstrap();
+        verify_release_envelope(&envelope).expect("valid self-use envelope");
+        assert_eq!(
+            serde_json::to_value(&envelope).unwrap()["releaseMode"],
+            json!("self-use")
+        );
+        envelope.schema_version = 2;
+        assert!(verify_release_envelope(&envelope).is_err());
     }
 
     #[test]
@@ -643,14 +554,14 @@ mod tests {
     }
 
     #[test]
-    fn signed_envelopes_reject_unknown_fields() {
-        let mut value = serde_json::to_value(signed_bootstrap()).unwrap();
+    fn release_envelopes_reject_unknown_fields() {
+        let mut value = serde_json::to_value(self_use_bootstrap()).unwrap();
         value["unexpected"] = json!(true);
-        assert!(serde_json::from_value::<SignedEnvelope<BootstrapPayload>>(value).is_err());
+        assert!(serde_json::from_value::<ReleaseEnvelope<BootstrapPayload>>(value).is_err());
     }
 
     #[test]
-    fn manifest_requires_signed_archive_tree_digests_only_for_managed_directories() {
+    fn manifest_requires_tree_digests_and_role_scoped_provenance() {
         let payload = ManifestPayload {
             product: "tauri-codex".to_string(),
             version: "0.2.0".to_string(),
@@ -665,19 +576,39 @@ mod tests {
             ],
         };
         validate_manifest(
-            &signed_manifest(payload.clone()),
-            &signed_bootstrap().payload,
+            &self_use_manifest(payload.clone()),
+            &self_use_bootstrap().payload,
         )
         .unwrap();
 
         let mut missing = payload.clone();
         missing.components[0].installed_tree_sha256 = None;
-        assert!(validate_manifest(&signed_manifest(missing), &signed_bootstrap().payload).is_err());
+        assert!(
+            validate_manifest(&self_use_manifest(missing), &self_use_bootstrap().payload).is_err()
+        );
 
         let mut node_tree = payload;
         node_tree.components[2].installed_tree_sha256 = Some("d".repeat(64));
         assert!(
-            validate_manifest(&signed_manifest(node_tree), &signed_bootstrap().payload).is_err()
+            validate_manifest(&self_use_manifest(node_tree), &self_use_bootstrap().payload)
+                .is_err()
         );
+
+        let mut weakened = self_use_manifest(ManifestPayload {
+            product: "tauri-codex".to_string(),
+            version: "0.2.0".to_string(),
+            platform: "windows".to_string(),
+            architecture: "x86_64".to_string(),
+            minimum_launcher_version: "1.1.0".to_string(),
+            minimum_manager_version: "0.2.0".to_string(),
+            components: vec![
+                component(ComponentId::Manager, Some("b".repeat(64))),
+                component(ComponentId::Codex, Some("c".repeat(64))),
+                component(ComponentId::Node, None),
+            ],
+        });
+        weakened.payload.components[1].provenance = SELF_USE_PROVENANCE.to_string();
+        weakened.payload.components[1].artifact.provenance = SELF_USE_PROVENANCE.to_string();
+        assert!(validate_manifest(&weakened, &self_use_bootstrap().payload).is_err());
     }
 }

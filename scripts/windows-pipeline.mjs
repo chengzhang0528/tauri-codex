@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createHash, createPrivateKey, createPublicKey, randomUUID, sign, verify } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
@@ -31,21 +31,19 @@ const bootstrapResource = path.join(appRoot, "src-tauri", "resources", "bootstra
 const candidateOutput = path.join(releaseRoot, "candidate.json");
 const OSS_ROOT = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 const MANAGER_FILES = ["tauri-codex-manager.exe", "WebView2Loader.dll"];
+export const RELEASE_SCHEMA_VERSION = 3;
+export const RELEASE_MODE = "self-use";
+export const SELF_USE_PROVENANCE = "unsigned-self-use+sha256";
+export const UPSTREAM_PROVENANCE = "upstream-authenticode+sha256";
+export const METADATA_PROVENANCE = "self-use+sha256";
 
-export function canonicalJson(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+export function selfUseEnvelope(payload) {
+  return { schemaVersion: RELEASE_SCHEMA_VERSION, releaseMode: RELEASE_MODE, payload };
 }
 
-export function signEnvelope(payload, { keyId, privateKey }) {
-  const signature = sign(null, Buffer.from(canonicalJson(payload)), privateKey).toString("base64");
-  return { schemaVersion: 2, keyId, payload, signature };
-}
-
-export function verifyEnvelope(envelope, { keyId, publicKey }) {
-  if (envelope?.schemaVersion !== 2 || envelope.keyId !== keyId) throw new Error("signed envelope identity 不匹配");
-  if (!verify(null, Buffer.from(canonicalJson(envelope.payload)), publicKey, Buffer.from(envelope.signature, "base64"))) throw new Error("Ed25519 signature 校验失败");
+export function verifySelfUseEnvelope(envelope) {
+  const fields = envelope && typeof envelope === "object" ? Object.keys(envelope).sort() : [];
+  if (envelope?.schemaVersion !== RELEASE_SCHEMA_VERSION || envelope.releaseMode !== RELEASE_MODE || !envelope.payload || fields.join(",") !== "payload,releaseMode,schemaVersion") throw new Error("self-use envelope identity 不匹配");
   return envelope.payload;
 }
 
@@ -63,7 +61,7 @@ function gitOutput(args) {
 }
 
 function frozenSource() {
-  if (gitOutput(["status", "--porcelain"])) fail("生产候选必须从 clean Git worktree 构建。");
+  if (gitOutput(["status", "--porcelain"])) fail("self-use 候选必须从 clean Git worktree 构建。");
   const commit = gitOutput(["rev-parse", "HEAD"]);
   if (!/^[a-f0-9]{40}$/.test(commit)) fail("无法固定 source commit。");
   return commit;
@@ -98,26 +96,6 @@ function toolchainEnvironment() {
   return { env, rustup };
 }
 
-function releaseSigning() {
-  const keyId = process.env.TAURI_CODEX_RELEASE_KEY_ID?.trim();
-  const privateBytes = process.env.TAURI_CODEX_RELEASE_PRIVATE_KEY?.trim();
-  const publicBytes = process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY?.trim();
-  if (!keyId || !privateBytes || !publicBytes) fail("生产候选缺少 TAURI_CODEX_RELEASE_KEY_ID/PRIVATE_KEY/PUBLIC_KEY。");
-  let privateKey;
-  try { privateKey = createPrivateKey({ key: Buffer.from(privateBytes, "base64"), format: "der", type: "pkcs8" }); } catch (error) { fail(`Ed25519 private key 无效：${error.message}`); }
-  const derived = createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32);
-  if (!derived.equals(Buffer.from(publicBytes, "base64"))) fail("Ed25519 public key 与 private key 不匹配。");
-  const publicKey = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), derived]), format: "der", type: "spki" });
-  return { keyId, privateKey, publicKey, publicRaw: publicBytes };
-}
-
-function publicSigning() {
-  const keyId = process.env.TAURI_CODEX_RELEASE_KEY_ID?.trim();
-  const bytes = Buffer.from(process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY?.trim() ?? "", "base64");
-  if (!keyId || bytes.length !== 32) fail("候选验证缺少可信 Ed25519 key ID/public key。");
-  return { keyId, publicKey: createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), bytes]), format: "der", type: "spki" }) };
-}
-
 function findSignTool() {
   if (process.env.TAURI_CODEX_SIGNTOOL && existsSync(process.env.TAURI_CODEX_SIGNTOOL)) return process.env.TAURI_CODEX_SIGNTOOL;
   const result = spawnSync("where.exe", ["signtool.exe"], { encoding: "utf8", windowsHide: true });
@@ -126,20 +104,7 @@ function findSignTool() {
   return found;
 }
 
-function signAuthenticode(filePath) {
-  const thumbprint = process.env.TAURI_CODEX_AUTHENTICODE_THUMBPRINT?.trim();
-  const timestamp = process.env.TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL?.trim();
-  if (!thumbprint || !timestamp) fail("生产候选缺少 Authenticode thumbprint 或 timestamp URL。");
-  const signtool = findSignTool();
-  run(signtool, ["sign", "/sha1", thumbprint, "/fd", "SHA256", "/tr", timestamp, "/td", "SHA256", filePath]);
-  verifyAuthenticode(filePath);
-}
-
 function verifyAuthenticode(filePath) { run(findSignTool(), ["verify", "/pa", "/all", filePath]); }
-function ensureAuthenticode(filePath) {
-  const verified = spawnSync(findSignTool(), ["verify", "/pa", "/all", filePath], { stdio: "ignore", windowsHide: true });
-  if (verified.status !== 0) signAuthenticode(filePath);
-}
 function filesBelow(root) {
   const files = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -241,24 +206,24 @@ function bootstrap() {
   console.log(JSON.stringify({ bootstrapped: true, target: versions.rustTarget, codexVersion: versions.codexVersion, nodeVersion: versions.nodeVersion }, null, 2));
 }
 
-function buildBinaries(toolchain, signing) {
-  const env = { ...toolchain.env, CARGO_TARGET_DIR: releaseCargoRoot, TAURI_CODEX_RELEASE_KEY_ID: signing.keyId, TAURI_CODEX_RELEASE_PUBLIC_KEY: signing.publicRaw };
+function buildBinaries(toolchain) {
+  const env = { ...toolchain.env, CARGO_TARGET_DIR: releaseCargoRoot };
   run(process.execPath, [appScript, "build", "--no-bundle"], { env });
   run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "build", "--manifest-path", path.join(appRoot, "src-tauri", "Cargo.toml"), "--release", "--target", versions.rustTarget, "--bin", "tauri-codex-manager", "--features", "custom-protocol"], { env });
-  for (const binary of [launcherSource, managerSource]) { if (!existsSync(binary)) fail(`构建产物不存在：${binary}`); signAuthenticode(binary); }
+  for (const binary of [launcherSource, managerSource]) if (!existsSync(binary)) fail(`构建产物不存在：${binary}`);
   if (!existsSync(webviewLoaderSource)) fail("Manager 缺少 WebView2Loader.dll。");
   verifyAuthenticode(webviewLoaderSource);
   return env;
 }
 
-function prepareComponents(signing) {
+function prepareComponents() {
   mkdirSync(componentRoot, { recursive: true });
   const codexRoot = path.join(appRoot, "src-tauri", "resources", "codex");
   const nodeMsi = path.join(appRoot, "src-tauri", "resources", "node", `node-v${versions.nodeVersion}-x64.msi`);
   if (!existsSync(path.join(codexRoot, "node_modules", "@openai", "codex", "package.json")) || !existsSync(nodeMsi)) fail("Codex/Node 构建输入不完整，请先运行 bootstrap。");
   const codexExecutables = filesBelow(codexRoot).filter((file) => path.extname(file).toLowerCase() === ".exe");
   if (codexExecutables.length === 0) fail("Codex 构建输入不包含 Windows executable。");
-  for (const executable of codexExecutables) ensureAuthenticode(executable);
+  for (const executable of codexExecutables) verifyAuthenticode(executable);
   verifyAuthenticode(nodeMsi);
   const managerArchive = path.join(componentRoot, `tauri-codex-manager-${appVersion}-windows-x64.zip`);
   const codexArchive = path.join(componentRoot, `tauri-codex-codex-${versions.codexVersion}-windows-x64.zip`);
@@ -276,14 +241,14 @@ function prepareComponents(signing) {
     product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
     minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,
     components: [
-      { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: "authenticode+ed25519", installedTreeSha256: managerTreeSha256, artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), "authenticode+ed25519") },
-      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: "authenticode+ed25519", installedTreeSha256: codexTreeSha256, artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), "authenticode+ed25519") },
-      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: "authenticode+ed25519", installedTreeSha256: null, artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), "authenticode+ed25519") },
+      { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: SELF_USE_PROVENANCE, installedTreeSha256: managerTreeSha256, artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), SELF_USE_PROVENANCE) },
+      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: UPSTREAM_PROVENANCE, installedTreeSha256: codexTreeSha256, artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), UPSTREAM_PROVENANCE) },
+      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: UPSTREAM_PROVENANCE, installedTreeSha256: null, artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), UPSTREAM_PROVENANCE) },
     ],
   };
-  const envelope = signEnvelope(payload, signing);
+  const envelope = selfUseEnvelope(payload);
   writeJson(manifestOutput, envelope);
-  return { managerArchive, codexArchive, nodeAsset, payload, envelope, manifest: objectArtifact(manifestOutput, releaseKey("manifest.json"), "ed25519") };
+  return { managerArchive, codexArchive, nodeAsset, payload, envelope, manifest: objectArtifact(manifestOutput, releaseKey("manifest.json"), METADATA_PROVENANCE) };
 }
 
 let probedInstaller;
@@ -308,8 +273,7 @@ function probePublishedInstaller() {
       return probedInstaller;
     }
     const measured = artifactRecord(downloaded);
-    verifyAuthenticode(downloaded);
-    probedInstaller = { objectKey: key, size: measured.size, sha256: measured.sha256, provenance: "authenticode+ed25519" };
+    probedInstaller = { objectKey: key, size: measured.size, sha256: measured.sha256, provenance: SELF_USE_PROVENANCE };
   } finally {
     rmSync(downloaded, { force: true });
   }
@@ -320,12 +284,11 @@ function shouldBuildInstaller() { return process.env.TAURI_BUILD_INSTALLER === "
 
 function publishedInstaller() {
   const artifact = installerVersions.publishedArtifact ?? probePublishedInstaller();
-  if (!artifact || artifact.objectKey !== installerKey(`tauri-codex_${installerVersion}_x64-setup.exe`) || !Number.isSafeInteger(artifact.size) || artifact.size <= 0 || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.provenance !== "authenticode+ed25519") fail("installer-versions.json 缺少可复用 OSS Installer identity。");
+  if (!artifact || artifact.objectKey !== installerKey(`tauri-codex_${installerVersion}_x64-setup.exe`) || !Number.isSafeInteger(artifact.size) || artifact.size <= 0 || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.provenance !== SELF_USE_PROVENANCE) fail("installer-versions.json 缺少可复用 self-use OSS Installer identity。");
   const downloaded = path.join(releaseRoot, `.reused-installer-${installerVersion}.exe`);
   try {
     run("curl.exe", ["--fail", "--silent", "--show-error", "--output", downloaded, `${OSS_ROOT}/${artifact.objectKey}`]);
     if (statSync(downloaded).size !== artifact.size || sha256(downloaded) !== artifact.sha256) fail("OSS Installer 匿名回读 identity 不匹配。");
-    verifyAuthenticode(downloaded);
   } finally {
     rmSync(downloaded, { force: true });
   }
@@ -333,31 +296,30 @@ function publishedInstaller() {
 }
 
 function buildReleaseCandidate() {
-  const signing = releaseSigning();
   const toolchain = toolchainEnvironment();
   const sourceCommit = frozenSource();
   rmSync(releaseRoot, { recursive: true, force: true });
   rmSync(releaseCargoRoot, { recursive: true, force: true });
   mkdirSync(releaseRoot, { recursive: true });
-  const buildEnv = buildBinaries(toolchain, signing);
-  const components = prepareComponents(signing);
+  const buildEnv = buildBinaries(toolchain);
+  const components = prepareComponents();
   const seedPayload = { product: "tauri-codex", platform: "windows", architecture: "x86_64", minimumLauncherVersion: installerVersion, installer: null, release: { version: appVersion, manifest: components.manifest } };
   let installer;
   let installerLocalPath = null;
   if (shouldBuildInstaller()) {
     const originalBootstrap = readFileSync(bootstrapResource);
     try {
-      writeJson(bootstrapResource, signEnvelope(seedPayload, signing));
+      writeJson(bootstrapResource, selfUseEnvelope(seedPayload));
       runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv);
     } finally {
       writeFileSync(bootstrapResource, originalBootstrap);
     }
     if (!existsSync(installerSource)) fail(`Tauri 未生成 ${installerSource}`);
-    for (const binary of [launcherSource, managerSource, webviewLoaderSource]) verifyAuthenticode(binary);
-    signAuthenticode(installerSource); copyFileSync(installerSource, installerOutput); installer = objectArtifact(installerOutput, installerKey(path.basename(installerOutput)), "authenticode+ed25519"); installerLocalPath = path.relative(releaseRoot, installerOutput).replaceAll(path.sep, "/");
+    verifyAuthenticode(webviewLoaderSource);
+    copyFileSync(installerSource, installerOutput); installer = objectArtifact(installerOutput, installerKey(path.basename(installerOutput)), SELF_USE_PROVENANCE); installerLocalPath = path.relative(releaseRoot, installerOutput).replaceAll(path.sep, "/");
   } else installer = publishedInstaller();
   const bootstrapPayload = { ...seedPayload, installer: { version: installerVersion, artifact: installer } };
-  writeJson(bootstrapOutput, signEnvelope(bootstrapPayload, signing));
+  writeJson(bootstrapOutput, selfUseEnvelope(bootstrapPayload));
   const manifestComponents = components.payload.components;
   const immutable = [
     { role: "manifest", localPath: "manifest.json", artifact: components.manifest },
@@ -366,20 +328,20 @@ function buildReleaseCandidate() {
     { role: "node", localPath: path.relative(releaseRoot, components.nodeAsset).replaceAll(path.sep, "/"), artifact: manifestComponents.find((component) => component.id === "node").artifact },
     { role: "installer", localPath: installerLocalPath, artifact: installer },
   ];
-  const candidate = { product: "tauri-codex", version: appVersion, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit, bootstrap: { localPath: "bootstrap.json", objectKey: "bootstrap/windows-x64.json", size: statSync(bootstrapOutput).size, sha256: sha256(bootstrapOutput), provenance: "ed25519" }, immutable };
+  const candidate = { product: "tauri-codex", version: appVersion, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit, bootstrap: { localPath: "bootstrap.json", objectKey: "bootstrap/windows-x64.json", size: statSync(bootstrapOutput).size, sha256: sha256(bootstrapOutput), provenance: METADATA_PROVENANCE }, immutable };
   assertFrozenSource(sourceCommit);
-  writeJson(candidateOutput, signEnvelope(candidate, signing));
+  writeJson(candidateOutput, selfUseEnvelope(candidate));
   console.log(JSON.stringify({ built: true, version: appVersion, installerVersion, installerReused: !installerLocalPath, candidate: artifactRecord(candidateOutput) }, null, 2));
 }
 
 function verifyReleaseCandidate() {
   if (!existsSync(candidateOutput)) fail("候选不存在，先运行 installer:build。");
-  const trust = publicSigning(); const candidateEnvelope = JSON.parse(readFileSync(candidateOutput, "utf8"));
-  const candidate = verifyEnvelope(candidateEnvelope, trust);
+  const candidateEnvelope = JSON.parse(readFileSync(candidateOutput, "utf8"));
+  const candidate = verifySelfUseEnvelope(candidateEnvelope);
   if (candidate.version !== appVersion || candidate.installerVersion !== installerVersion || candidate.sourceCommit !== frozenSource()) fail("candidate identity 与版本源不一致。");
   const manifest = JSON.parse(readFileSync(manifestOutput, "utf8")); const bootstrapEnvelope = JSON.parse(readFileSync(bootstrapOutput, "utf8"));
-  const manifestPayload = verifyEnvelope(manifest, trust); const bootstrapPayload = verifyEnvelope(bootstrapEnvelope, trust);
-  if (manifestPayload.version !== appVersion || bootstrapPayload.release.version !== appVersion || bootstrapPayload.release.manifest.sha256 !== sha256(manifestOutput) || bootstrapPayload.installer.version !== installerVersion) fail("signed closure 版本或摘要不一致。");
+  const manifestPayload = verifySelfUseEnvelope(manifest); const bootstrapPayload = verifySelfUseEnvelope(bootstrapEnvelope);
+  if (manifestPayload.version !== appVersion || bootstrapPayload.release.version !== appVersion || bootstrapPayload.release.manifest.sha256 !== sha256(manifestOutput) || bootstrapPayload.installer.version !== installerVersion) fail("self-use closure 版本或摘要不一致。");
   for (const item of candidate.immutable) {
     if (!item.localPath) continue;
     const filePath = path.join(releaseRoot, item.localPath); if (!existsSync(filePath)) fail(`candidate localPath 缺失：${item.localPath}`);
@@ -390,11 +352,11 @@ function verifyReleaseCandidate() {
   verifyArchiveTree(path.join(releaseRoot, manager.localPath), manifestPayload.components.find((component) => component.id === "manager").installedTreeSha256);
   verifyArchiveTree(path.join(releaseRoot, codex.localPath), manifestPayload.components.find((component) => component.id === "codex").installedTreeSha256);
   for (const entry of [path.join(appRoot, "dist", "index.html"), path.join(appRoot, "dist", "launcher.html")]) if (!existsSync(entry)) fail(`Vite 构建入口缺失：${entry}`);
-  console.log(JSON.stringify({ verified: true, version: appVersion, installerVersion, schemaVersion: 2, source: OSS_ROOT }, null, 2));
+  console.log(JSON.stringify({ verified: true, version: appVersion, installerVersion, schemaVersion: RELEASE_SCHEMA_VERSION, releaseMode: RELEASE_MODE, source: OSS_ROOT }, null, 2));
 }
 
 function build() {
-  const signing = releaseSigning(); const toolchain = toolchainEnvironment(); buildBinaries(toolchain, signing);
+  const toolchain = toolchainEnvironment(); buildBinaries(toolchain);
   const output = path.join(buildRoot, "build", appVersion, "windows-x64", "tauri-codex.exe"); mkdirSync(path.dirname(output), { recursive: true }); copyFileSync(launcherSource, output); console.log(JSON.stringify({ built: true, artifact: artifactRecord(output) }, null, 2));
 }
 

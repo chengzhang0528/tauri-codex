@@ -35,7 +35,7 @@ pub struct LauncherStatus {
 impl Default for LauncherStatus {
     fn default() -> Self {
         Self {
-            phase: "正在读取 signed Bootstrap".to_string(),
+            phase: "正在读取 self-use Bootstrap".to_string(),
             component: "初始化".to_string(),
             downloaded: 0,
             total: 0,
@@ -687,7 +687,7 @@ fn activation_health(root: &Path) -> Result<(), String> {
         &fs::read(release.join("release.json")).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("current manifest 损坏：{error}"))?;
-    contract::verify_envelope(&manifest)?;
+    contract::verify_release_envelope(&manifest)?;
     component::verify_installed_release(root, &manifest)?;
     let node = manifest
         .payload
@@ -916,7 +916,7 @@ fn read_bootstrap_remote_with_digest() -> Result<(Bootstrap, String), String> {
         return Err("Bootstrap 超过大小上限".to_string());
     }
     let digest = contract::digest(&bytes);
-    Ok((contract::parse_signed(&bytes, "Bootstrap")?, digest))
+    Ok((contract::parse_release(&bytes, "Bootstrap")?, digest))
 }
 
 fn verify_target_bootstrap(identity: Option<&TargetIdentity>, actual: &str) -> Result<(), String> {
@@ -945,8 +945,8 @@ fn read_bootstrap_installed() -> Result<Bootstrap, String> {
     ]
     .into_iter()
     .find(|path| path.is_file())
-    .ok_or_else(|| "Installer 缺少 signed Bootstrap seed".to_string())?;
-    contract::parse_signed(
+    .ok_or_else(|| "Installer 缺少 self-use Bootstrap seed".to_string())?;
+    contract::parse_release(
         &fs::read(path).map_err(|error| error.to_string())?,
         "installed Bootstrap",
     )
@@ -975,7 +975,7 @@ fn read_manifest(bootstrap: &Bootstrap) -> Result<Manifest, String> {
     if bytes.len() as u64 != artifact.size || contract::digest(&bytes) != artifact.sha256 {
         return Err("manifest size/SHA-256 不匹配".to_string());
     }
-    let manifest = contract::parse_signed(&bytes, "release manifest")?;
+    let manifest = contract::parse_release(&bytes, "release manifest")?;
     contract::validate_manifest(&manifest, &bootstrap.payload)?;
     let launcher =
         semver::Version::parse(&include_installer_version()?).map_err(|error| error.to_string())?;
@@ -1097,13 +1097,14 @@ fn now() -> u64 {
 mod tests {
     use super::{ensure_manager_version_supported, select_target};
     use crate::delivery::contract::{
-        Artifact, Bootstrap, BootstrapPayload, InstallerRef, ReleaseRef, UpdateTarget,
+        Artifact, Bootstrap, BootstrapPayload, InstallerRef, ReleaseMode, ReleaseRef, UpdateTarget,
+        METADATA_PROVENANCE, SELF_USE_PROVENANCE,
     };
 
     fn bootstrap(installer: &str, release: &str, minimum: &str) -> Bootstrap {
         Bootstrap {
-            schema_version: 2,
-            key_id: "test".to_string(),
+            schema_version: 3,
+            release_mode: ReleaseMode::SelfUse,
             payload: BootstrapPayload {
                 product: "tauri-codex".to_string(),
                 platform: "windows".to_string(),
@@ -1117,7 +1118,7 @@ mod tests {
                         ),
                         size: 1,
                         sha256: "a".repeat(64),
-                        provenance: "authenticode+ed25519".to_string(),
+                        provenance: SELF_USE_PROVENANCE.to_string(),
                     },
                 }),
                 release: ReleaseRef {
@@ -1126,11 +1127,10 @@ mod tests {
                         object_key: format!("releases/{release}/windows-x64/manifest.json"),
                         size: 1,
                         sha256: "b".repeat(64),
-                        provenance: "ed25519".to_string(),
+                        provenance: METADATA_PROVENANCE.to_string(),
                     },
                 },
             },
-            signature: "test".to_string(),
         }
     }
 

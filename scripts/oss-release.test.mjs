@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installedTreeSha256, signEnvelope } from "./windows-pipeline.mjs";
+import { installedTreeSha256, selfUseEnvelope } from "./windows-pipeline.mjs";
 import {
   commitRelease,
   compareVersions,
@@ -19,12 +19,6 @@ import {
 } from "./oss-release.mjs";
 
 const baseURL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
-const keyId = "test-release-key";
-const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-const releasePublicKey = publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
-const trust = { keyId, privateKey, publicKey };
-const publisherTrust = { releaseKeyId: keyId, releasePublicKey };
-
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -55,7 +49,7 @@ function legacyBootstrapBytes(version = "0.1.11", installerVersion = "1.0.4") {
 }
 
 function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-oss-v2-"));
+  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-oss-v3-"));
   const componentsRoot = path.join(root, "components");
   mkdirSync(componentsRoot);
   const blobs = {
@@ -71,10 +65,10 @@ function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
     installer: `tauri-codex_${installerVersion}_x64-setup.exe`,
   };
   const records = {
-    manager: artifact(`releases/${version}/windows-x64/components/${names.manager}`, blobs.manager, "authenticode+ed25519"),
-    codex: artifact(`releases/${version}/windows-x64/components/${names.codex}`, blobs.codex, "authenticode+ed25519"),
-    node: artifact(`releases/${version}/windows-x64/components/${names.node}`, blobs.node, "authenticode+ed25519"),
-    installer: artifact(`installers/${installerVersion}/windows-x64/${names.installer}`, blobs.installer, "authenticode+ed25519"),
+    manager: artifact(`releases/${version}/windows-x64/components/${names.manager}`, blobs.manager, "unsigned-self-use+sha256"),
+    codex: artifact(`releases/${version}/windows-x64/components/${names.codex}`, blobs.codex, options.codexProvenance ?? "upstream-authenticode+sha256"),
+    node: artifact(`releases/${version}/windows-x64/components/${names.node}`, blobs.node, "upstream-authenticode+sha256"),
+    installer: artifact(`installers/${installerVersion}/windows-x64/${names.installer}`, blobs.installer, "unsigned-self-use+sha256"),
   };
   const manifestPayload = {
     product: "tauri-codex", version, platform: "windows", architecture: "x86_64",
@@ -85,14 +79,14 @@ function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
       { id: "node", version: "24.19.0", kind: "system", archive: "msi", required: true, installPath: "system", provenance: records.node.provenance, installedTreeSha256: null, artifact: records.node },
     ],
   };
-  const manifestBytes = jsonBytes(signEnvelope(manifestPayload, trust));
-  records.manifest = artifact(`releases/${version}/windows-x64/manifest.json`, manifestBytes, "ed25519");
+  const manifestBytes = jsonBytes(selfUseEnvelope(manifestPayload));
+  records.manifest = artifact(`releases/${version}/windows-x64/manifest.json`, manifestBytes, "self-use+sha256");
   const bootstrapPayload = {
     product: "tauri-codex", platform: "windows", architecture: "x86_64", minimumLauncherVersion: installerVersion,
     installer: { version: installerVersion, artifact: records.installer },
     release: { version, manifest: records.manifest },
   };
-  const bootstrapBytes = jsonBytes(signEnvelope(bootstrapPayload, trust));
+  const bootstrapBytes = jsonBytes(selfUseEnvelope(bootstrapPayload));
   writeFileSync(path.join(root, "manifest.json"), manifestBytes);
   writeFileSync(path.join(root, "bootstrap.json"), bootstrapBytes);
   for (const role of ["manager", "codex", "node"]) writeFileSync(path.join(componentsRoot, names[role]), blobs[role]);
@@ -104,10 +98,10 @@ function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
   ];
   const candidatePayload = {
     product: "tauri-codex", version, installerVersion, platform: "windows", architecture: "x86_64", sourceCommit: "a".repeat(40),
-    bootstrap: { localPath: "bootstrap.json", objectKey: OSS_BOOTSTRAP_KEY, size: bootstrapBytes.length, sha256: digest(bootstrapBytes), provenance: "ed25519" },
+    bootstrap: { localPath: "bootstrap.json", objectKey: OSS_BOOTSTRAP_KEY, size: bootstrapBytes.length, sha256: digest(bootstrapBytes), provenance: "self-use+sha256" },
     immutable,
   };
-  writeFileSync(path.join(root, "candidate.json"), jsonBytes(signEnvelope(candidatePayload, trust)));
+  writeFileSync(path.join(root, "candidate.json"), jsonBytes(selfUseEnvelope(candidatePayload)));
   return { root, records, blobs, bootstrapBytes, candidatePayload };
 }
 
@@ -149,7 +143,7 @@ function fakeFetch(options = {}) {
 }
 
 function publishOptions(release, remote) {
-  return { releaseRoot: release.root, expectedSourceCommit: "a".repeat(40), accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl, ...publisherTrust };
+  return { releaseRoot: release.root, expectedSourceCommit: "a".repeat(40), accessKeyId: "id", accessKeySecret: "secret", fetchImpl: remote.fetchImpl };
 }
 
 async function snapshotAndCommit(release, remote) {
@@ -158,7 +152,7 @@ async function snapshotAndCommit(release, remote) {
   return commitRelease(options);
 }
 
-test("validates object keys, versions, and OSS signatures", () => {
+test("validates object keys, versions, and OSS authorization", () => {
   assert.equal(safeObjectKey("releases/0.2.0/windows-x64/manifest.json"), true);
   assert.equal(safeObjectKey("releases/0.2.0/../secret"), false);
   assert.equal(compareVersions("0.2.0", "0.1.9"), 1);
@@ -166,7 +160,7 @@ test("validates object keys, versions, and OSS signatures", () => {
 });
 
 test("build and runtime share the fixed installed-tree digest format", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-tree-v2-"));
+  const root = mkdtempSync(path.join(os.tmpdir(), "tauri-codex-tree-v3-"));
   try {
     mkdirSync(path.join(root, "Bin"));
     writeFileSync(path.join(root, "Bin", "app.exe"), "app");
@@ -218,6 +212,17 @@ test("stages immutable objects without moving Bootstrap", async () => {
   }
 });
 
+test("self-use policy does not weaken third-party provenance", async () => {
+  const release = fixture("0.2.0", "1.1.0", { codexProvenance: "unsigned-self-use+sha256" });
+  const remote = fakeFetch();
+  try {
+    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /manifest codex 规则无效/);
+    assert.equal(remote.events.length, 0);
+  } finally {
+    rmSync(release.root, { recursive: true, force: true });
+  }
+});
+
 test("reuses a stable Installer only after OSS identity readback", async () => {
   const release = fixture("0.2.1", "1.1.0", { reuseInstaller: true });
   const remote = fakeFetch({ objects: [[release.records.installer.objectKey, release.blobs.installer]] });
@@ -260,7 +265,7 @@ test("snapshot captures the exact previous Bootstrap bytes and ETag", async () =
   }
 });
 
-test("first v2 publication conditionally migrates a validated schema v1 Bootstrap", async () => {
+test("first v3 publication conditionally migrates a validated schema v1 Bootstrap", async () => {
   const release = fixture();
   const previous = legacyBootstrapBytes();
   const remote = fakeFetch({ objects: [[OSS_BOOTSTRAP_KEY, previous]] });
@@ -297,7 +302,7 @@ test("commit refuses an incomplete OSS closure", async () => {
   }
 });
 
-test("candidate signature and frozen bytes reject mutation", async () => {
+test("candidate identity and frozen bytes reject mutation", async () => {
   const release = fixture();
   const remote = fakeFetch();
   try {
@@ -305,9 +310,9 @@ test("candidate signature and frozen bytes reject mutation", async () => {
     const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
     candidate.payload.version = "0.2.1";
     writeFileSync(candidatePath, jsonBytes(candidate));
-    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /signature/);
+    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /identity/);
 
-    writeFileSync(candidatePath, jsonBytes(signEnvelope(release.candidatePayload, trust)));
+    writeFileSync(candidatePath, jsonBytes(selfUseEnvelope(release.candidatePayload)));
     writeFileSync(path.join(release.root, "components", path.basename(release.records.manager.objectKey)), "mutated");
     await assert.rejects(() => stageRelease(publishOptions(release, remote)), /bytes/);
   } finally {
@@ -329,7 +334,7 @@ test("publisher rejects a candidate from a different source commit", async () =>
   }
 });
 
-test("commit rejects a signed Bootstrap downgrade", async () => {
+test("commit rejects a self-use Bootstrap downgrade", async () => {
   const current = fixture("0.2.1", "1.1.0");
   const older = fixture("0.2.0", "1.1.0");
   const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
@@ -391,12 +396,12 @@ test("conditional Bootstrap commit rejects a concurrent writer", async () => {
   }
 });
 
-test("commit rejects a signed but malformed current Bootstrap", async () => {
+test("commit rejects a malformed self-use current Bootstrap", async () => {
   const current = fixture("0.1.9", "1.0.9");
   const next = fixture("0.2.0", "1.1.0");
   const currentPayload = JSON.parse(current.bootstrapBytes.toString("utf8")).payload;
   currentPayload.release.version = "invalid";
-  const malformed = jsonBytes(signEnvelope(currentPayload, trust));
+  const malformed = jsonBytes(selfUseEnvelope(currentPayload));
   const objects = [[OSS_BOOTSTRAP_KEY, malformed]];
   for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
   const remote = fakeFetch({ objects });

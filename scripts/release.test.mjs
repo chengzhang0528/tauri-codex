@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { canonicalJson, signEnvelope, verifyEnvelope } from "./windows-pipeline.mjs";
+import { selfUseEnvelope, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
 import { nextPatchVersion, replaceVersion } from "./release.mjs";
 
 test("increments a stable patch version", () => {
@@ -36,15 +35,14 @@ test("Manager and Installer versions have independent canonical owners", () => {
   ]);
 });
 
-test("schema v2 canonical JSON and Ed25519 envelopes reject mutation", () => {
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  const trust = { keyId: "test-key", privateKey, publicKey };
+test("schema v3 makes the unsigned self-use policy explicit", () => {
   const payload = { z: [3, { b: true, a: null }], a: "value" };
-  assert.equal(canonicalJson(payload), '{"a":"value","z":[3,{"a":null,"b":true}]}');
-  const envelope = signEnvelope(payload, trust);
-  assert.deepEqual(verifyEnvelope(envelope, trust), payload);
-  envelope.payload.a = "mutated";
-  assert.throws(() => verifyEnvelope(envelope, trust), /signature/);
+  const envelope = selfUseEnvelope(payload);
+  assert.deepEqual(envelope, { schemaVersion: 3, releaseMode: "self-use", payload });
+  assert.deepEqual(verifySelfUseEnvelope(envelope), payload);
+  assert.throws(() => verifySelfUseEnvelope({ ...envelope, schemaVersion: 2 }), /identity/);
+  assert.throws(() => verifySelfUseEnvelope({ ...envelope, releaseMode: "production" }), /identity/);
+  assert.throws(() => verifySelfUseEnvelope({ ...envelope, unexpected: true }), /identity/);
 });
 
 test("launcher event subscriptions are covered by the default capability", () => {
@@ -87,7 +85,8 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
   const ipc = readFileSync(new URL("../app/src-tauri/src/delivery/ipc.rs", import.meta.url), "utf8");
   const launcher = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(health, /root\.join\("WebView2Loader\.dll"\)/);
-  assert.match(health, /verify_authenticode_tree\(root\)/);
+  assert.match(health, /verify_authenticode\(&root\.join\("WebView2Loader\.dll"\)\)/);
+  assert.match(health, /doctor_codex[\s\S]*verify_authenticode_tree\(root\)/);
   assert.match(broker, /automatic_cycle\(&automatic\)/);
   assert.match(broker, /UpdateIntent::Prepare/);
   assert.match(broker, /UpdateState::SetupRequired/);
@@ -116,8 +115,15 @@ test("release workflow commits OSS before creating OSS-only GitHub Release Notes
   assert.match(workflow, /publish:release:oss -- snapshot/);
   assert.match(workflow, /publish:release:oss -- confirm/);
   assert.match(workflow, /publish:release:oss -- rollback/);
-  assert.match(workflow, /TAURI_CODEX_RELEASE_PRIVATE_KEY/);
-  assert.match(workflow, /TAURI_CODEX_AUTHENTICODE_PFX_BASE64/);
+  for (const secret of [
+    "TAURI_CODEX_AUTHENTICODE_PFX_BASE64",
+    "TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD",
+    "TAURI_CODEX_RELEASE_KEY_ID",
+    "TAURI_CODEX_RELEASE_PRIVATE_KEY",
+    "TAURI_CODEX_RELEASE_PUBLIC_KEY",
+    "TAURI_CODEX_AUTHENTICODE_TIMESTAMP_URL",
+  ]) assert.doesNotMatch(workflow, new RegExp(secret));
+  assert.match(workflow, /ALIYUN_OSS_ACCESS_KEY_ID/);
   assert.match(workflow, /shared-public-assets\.oss-cn-beijing\.aliyuncs\.com\/project-tauri-codex/);
   assert.doesNotMatch(workflow, /^\s+files:/m);
   assert.doesNotMatch(workflow, /Publish GitHub Release assets/);
@@ -148,8 +154,9 @@ test("runtime and tooling contain no legacy delivery owner or fallback", () => {
     .join("\n");
   const publisher = readFileSync(new URL("./oss-release.mjs", import.meta.url), "utf8");
   const seed = JSON.parse(readFileSync(new URL("../app/src-tauri/resources/bootstrap.json", import.meta.url), "utf8"));
-  assert.equal(seed.schemaVersion, 2);
-  assert.equal(seed.keyId, "development-rfc8032");
+  assert.equal(seed.schemaVersion, 3);
+  assert.equal(seed.releaseMode, "self-use");
+  assert.equal(seed.payload.release.manifest.provenance, "self-use+sha256");
   assert.doesNotMatch(delivery, /github\.com|npm install|installer@version|"previous"/i);
   assert.doesNotMatch(publisher, /github\.com|retireRelease/);
   assert.equal(existsSync(new URL("../app/src-tauri/src/thin.rs", import.meta.url)), false);

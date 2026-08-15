@@ -54,7 +54,7 @@ pub fn current_component_versions(root: &Path) -> Result<(Option<String>, Option
         &fs::read(path.join("release.json")).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
-    super::contract::verify_envelope(&manifest)?;
+    super::contract::verify_release_envelope(&manifest)?;
     let codex = manifest
         .payload
         .components
@@ -259,8 +259,6 @@ mod tests {
         ActivationJournal, ACTIVATION_JOURNAL_SCHEMA,
     };
     use crate::delivery::contract::UpdateTarget;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
     use std::fs;
 
@@ -277,23 +275,12 @@ mod tests {
             "minimumManagerVersion": version,
             "components": []
         });
-        let signing = SigningKey::from_bytes(&[
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-            0x1c, 0xae, 0x7f, 0x60,
-        ]);
-        let signature = STANDARD.encode(
-            signing
-                .sign(&crate::delivery::contract::canonical_json(&payload))
-                .to_bytes(),
-        );
         fs::write(
             path.join("release.json"),
             serde_json::to_vec(&json!({
-                "schemaVersion": 2,
-                "keyId": "development-rfc8032",
-                "payload": payload,
-                "signature": signature
+                "schemaVersion": 3,
+                "releaseMode": "self-use",
+                "payload": payload
             }))
             .unwrap(),
         )
@@ -483,7 +470,7 @@ fn validate_installed(path: &Path, version: &str) -> Result<(), String> {
         &fs::read(path.join("release.json")).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("release 元数据损坏：{error}"))?;
-    super::contract::verify_envelope(&manifest)?;
+    super::contract::verify_release_envelope(&manifest)?;
     if manifest.payload.version != version {
         return Err(format!("release 版本不匹配：{version}"));
     }

@@ -1,10 +1,10 @@
-import { createHash, createHmac, createPublicKey, randomUUID, verify } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { canonicalJson } from "./windows-pipeline.mjs";
+import { METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_PROVENANCE, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
 
 export const OSS_BASE_URL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 export const OSS_BUCKET = "shared-public-assets";
@@ -91,20 +91,8 @@ function validateArtifact(artifact, expectedPrefix) {
   if (!artifact || !safeObjectKey(artifact.objectKey) || !artifact.objectKey.startsWith(expectedPrefix) || !Number.isSafeInteger(artifact.size) || artifact.size <= 0 || !digestPattern.test(artifact.sha256) || typeof artifact.provenance !== "string" || !artifact.provenance) throw new Error(`invalid candidate artifact under ${expectedPrefix}`);
 }
 
-function releaseTrust(releaseKeyId, releasePublicKey) {
-  const keyId = releaseKeyId?.trim();
-  const raw = Buffer.from(releasePublicKey?.trim() ?? "", "base64");
-  if (!keyId || raw.length !== 32) throw new Error("TAURI_CODEX_RELEASE_KEY_ID and TAURI_CODEX_RELEASE_PUBLIC_KEY are required");
-  const publicKey = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), raw]), format: "der", type: "spki" });
-  return { keyId, publicKey };
-}
-
-function verifySignedEnvelope(envelope, trust, label) {
-  if (envelope?.schemaVersion !== 2 || envelope.keyId !== trust.keyId || !envelope.payload || typeof envelope.signature !== "string") throw new Error(`${label} signed envelope identity 无效`);
-  let signature;
-  try { signature = Buffer.from(envelope.signature, "base64"); } catch { throw new Error(`${label} signature 不是 base64`); }
-  if (signature.length !== 64 || !verify(null, Buffer.from(canonicalJson(envelope.payload)), trust.publicKey, signature)) throw new Error(`${label} Ed25519 signature 校验失败`);
-  return envelope.payload;
+function selfUsePayload(envelope, label) {
+  try { return verifySelfUseEnvelope(envelope); } catch (error) { throw new Error(`${label} ${error.message}`); }
 }
 
 function localBytes(releaseRoot, localPath, label) {
@@ -128,7 +116,8 @@ function validateManifestPayload(manifest, candidate) {
     if (!component || !expected[component.id] || ids.has(component.id)) throw new Error("manifest component ID 不唯一或未知");
     ids.add(component.id);
     const [kind, archive, installPath] = expected[component.id];
-    if (!stableVersion.test(component.version) || component.kind !== kind || component.archive !== archive || component.installPath !== installPath || component.required !== true || component.provenance !== "authenticode+ed25519") throw new Error(`manifest ${component.id} 规则无效`);
+    const expectedProvenance = component.id === "manager" ? SELF_USE_PROVENANCE : UPSTREAM_PROVENANCE;
+    if (!stableVersion.test(component.version) || component.kind !== kind || component.archive !== archive || component.installPath !== installPath || component.required !== true || component.provenance !== expectedProvenance) throw new Error(`manifest ${component.id} 规则无效`);
     if ((component.id === "manager" || component.id === "codex") && !digestPattern.test(component.installedTreeSha256)) throw new Error(`manifest ${component.id} 安装树 SHA-256 无效`);
     if (component.id === "node" && component.installedTreeSha256 != null) throw new Error("manifest node 不得声明安装树 SHA-256");
     validateArtifact(component.artifact, `releases/${candidate.version}/windows-x64/components/`);
@@ -143,10 +132,10 @@ function validatePublishedBootstrap(bootstrap) {
   if (bootstrap?.product !== "tauri-codex" || bootstrap.platform !== "windows" || bootstrap.architecture !== "x86_64" || !stableVersion.test(bootstrap.minimumLauncherVersion)) throw new Error("Bootstrap platform/compatibility 规则无效");
   if (!bootstrap.installer || !stableVersion.test(bootstrap.installer.version) || compareVersions(bootstrap.minimumLauncherVersion, bootstrap.installer.version) > 0) throw new Error("Bootstrap Installer version 无效");
   validateArtifact(bootstrap.installer.artifact, `installers/${bootstrap.installer.version}/windows-x64/`);
-  if (bootstrap.installer.artifact.provenance !== "authenticode+ed25519") throw new Error("Bootstrap Installer provenance 无效");
+  if (bootstrap.installer.artifact.provenance !== SELF_USE_PROVENANCE) throw new Error("Bootstrap Installer provenance 无效");
   if (!bootstrap.release || !stableVersion.test(bootstrap.release.version)) throw new Error("Bootstrap release version 无效");
   validateArtifact(bootstrap.release.manifest, `releases/${bootstrap.release.version}/windows-x64/`);
-  if (bootstrap.release.manifest.objectKey !== `releases/${bootstrap.release.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
+  if (bootstrap.release.manifest.objectKey !== `releases/${bootstrap.release.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== METADATA_PROVENANCE) throw new Error("Bootstrap manifest identity 无效");
 }
 
 function validateLegacyBootstrap(bootstrap) {
@@ -156,14 +145,14 @@ function validateLegacyBootstrap(bootstrap) {
   validateArtifact({ ...bootstrap.release.manifest, provenance: "legacy-manifest" }, `releases/${bootstrap.release.version}/windows-x64/`);
 }
 
-function previousBootstrapPayload(bytes, trust) {
+function previousBootstrapPayload(bytes) {
   let envelope;
   try { envelope = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("previous Bootstrap JSON 无效"); }
   if (envelope?.schemaVersion === 1) {
     validateLegacyBootstrap(envelope);
     return envelope;
   }
-  const payload = verifySignedEnvelope(envelope, trust, "previous Bootstrap");
+  const payload = selfUsePayload(envelope, "previous Bootstrap");
   validatePublishedBootstrap(payload);
   return payload;
 }
@@ -173,20 +162,20 @@ function validateBootstrapPayload(bootstrap, candidate) {
   if (bootstrap.product !== candidate.product || bootstrap.platform !== candidate.platform || bootstrap.architecture !== candidate.architecture || !stableVersion.test(bootstrap.minimumLauncherVersion) || compareVersions(bootstrap.minimumLauncherVersion, candidate.installerVersion) > 0) throw new Error("Bootstrap compatibility 规则无效");
   if (!bootstrap.installer || bootstrap.installer.version !== candidate.installerVersion) throw new Error("Bootstrap Installer identity 无效");
   validateArtifact(bootstrap.installer.artifact, `installers/${candidate.installerVersion}/windows-x64/`);
-  if (bootstrap.installer.artifact.provenance !== "authenticode+ed25519") throw new Error("Bootstrap Installer provenance 无效");
+  if (bootstrap.installer.artifact.provenance !== SELF_USE_PROVENANCE) throw new Error("Bootstrap Installer provenance 无效");
   if (!bootstrap.release || bootstrap.release.version !== candidate.version) throw new Error("Bootstrap release identity 无效");
   validateArtifact(bootstrap.release.manifest, `releases/${candidate.version}/windows-x64/`);
-  if (bootstrap.release.manifest.objectKey !== `releases/${candidate.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== "ed25519") throw new Error("Bootstrap manifest identity 无效");
+  if (bootstrap.release.manifest.objectKey !== `releases/${candidate.version}/windows-x64/manifest.json` || bootstrap.release.manifest.provenance !== METADATA_PROVENANCE) throw new Error("Bootstrap manifest identity 无效");
 }
 
-function loadCandidate(releaseRoot, trust, expectedSourceCommit) {
+function loadCandidate(releaseRoot, expectedSourceCommit) {
   const candidateEnvelope = JSON.parse(readFileSync(path.join(releaseRoot, "candidate.json"), "utf8"));
-  const candidate = verifySignedEnvelope(candidateEnvelope, trust, "candidate");
-  if (candidate.product !== "tauri-codex" || candidate.platform !== "windows" || candidate.architecture !== "x86_64" || !stableVersion.test(candidate.version) || !stableVersion.test(candidate.installerVersion) || !/^[a-f0-9]{40}$/.test(candidate.sourceCommit) || candidate.bootstrap?.objectKey !== OSS_BOOTSTRAP_KEY || candidate.bootstrap?.provenance !== "ed25519") throw new Error("candidate identity 无效");
+  const candidate = selfUsePayload(candidateEnvelope, "candidate");
+  if (candidate.product !== "tauri-codex" || candidate.platform !== "windows" || candidate.architecture !== "x86_64" || !stableVersion.test(candidate.version) || !stableVersion.test(candidate.installerVersion) || !/^[a-f0-9]{40}$/.test(candidate.sourceCommit) || candidate.bootstrap?.objectKey !== OSS_BOOTSTRAP_KEY || candidate.bootstrap?.provenance !== METADATA_PROVENANCE) throw new Error("candidate identity 无效");
   if (!/^[a-f0-9]{40}$/.test(expectedSourceCommit) || candidate.sourceCommit !== expectedSourceCommit) throw new Error("candidate source commit 与当前冻结源码不一致");
   const bootstrapBytes = localBytes(releaseRoot, candidate.bootstrap.localPath, "Bootstrap");
   if (bootstrapBytes.length !== candidate.bootstrap.size || sha256(bootstrapBytes) !== candidate.bootstrap.sha256) throw new Error("frozen Bootstrap bytes 已变化");
-  const bootstrap = verifySignedEnvelope(JSON.parse(bootstrapBytes.toString("utf8")), trust, "Bootstrap");
+  const bootstrap = selfUsePayload(JSON.parse(bootstrapBytes.toString("utf8")), "Bootstrap");
   if (bootstrap.product !== candidate.product || bootstrap.platform !== candidate.platform || bootstrap.architecture !== candidate.architecture || bootstrap.release?.version !== candidate.version || bootstrap.installer?.version !== candidate.installerVersion) throw new Error("Bootstrap 与 candidate identity 不一致");
   validateBootstrapPayload(bootstrap, candidate);
   const roles = candidate.immutable.map((item) => item.role);
@@ -201,15 +190,16 @@ function loadCandidate(releaseRoot, trust, expectedSourceCommit) {
   });
   const manifestItem = immutable.find((item) => item.role === "manifest");
   const installerItem = immutable.find((item) => item.role === "installer");
-  if (bootstrap.release.manifest.provenance !== "ed25519" || bootstrap.installer.artifact.provenance !== "authenticode+ed25519") throw new Error("Bootstrap artifact provenance 不满足发布身份要求");
+  if (bootstrap.release.manifest.provenance !== METADATA_PROVENANCE || bootstrap.installer.artifact.provenance !== SELF_USE_PROVENANCE) throw new Error("Bootstrap artifact provenance 不满足 self-use 要求");
   if (!sameArtifact(bootstrap.release.manifest, manifestItem.artifact) || !sameArtifact(bootstrap.installer.artifact, installerItem.artifact)) throw new Error("Bootstrap artifact closure 与 candidate 不一致");
-  const manifest = verifySignedEnvelope(JSON.parse(manifestItem.bytes.toString("utf8")), trust, "manifest");
+  const manifest = selfUsePayload(JSON.parse(manifestItem.bytes.toString("utf8")), "manifest");
   if (manifest.product !== candidate.product || manifest.version !== candidate.version || manifest.platform !== candidate.platform || manifest.architecture !== candidate.architecture) throw new Error("manifest 与 candidate identity 不一致");
   validateManifestPayload(manifest, candidate);
   for (const role of ["manager", "codex", "node"]) {
     const item = immutable.find((entry) => entry.role === role);
     const component = manifest.components?.find((entry) => entry.id === role && entry.required === true);
-    if (!component || component.artifact.provenance !== "authenticode+ed25519" || !sameArtifact(component.artifact, item.artifact)) throw new Error(`manifest ${role} closure 与 candidate 不一致`);
+    const expectedProvenance = role === "manager" ? SELF_USE_PROVENANCE : UPSTREAM_PROVENANCE;
+    if (!component || component.artifact.provenance !== expectedProvenance || !sameArtifact(component.artifact, item.artifact)) throw new Error(`manifest ${role} closure 与 candidate 不一致`);
   }
   return { candidate, bootstrapBytes, immutable };
 }
@@ -265,8 +255,8 @@ export async function preflightPublisher({ accessKeyId, accessKeySecret, fetchIm
   return { admitted: true, key };
 }
 
-export async function stageRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+export async function stageRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   for (const item of release.immutable) {
     if (item.bytes) await putObject(fetchImpl, config, item.artifact.objectKey, item.bytes, true);
     await verifyObject(fetchImpl, config, item.artifact, item.role);
@@ -274,12 +264,12 @@ export async function stageRelease({ releaseRoot, expectedSourceCommit, accessKe
   return { staged: true, release: release.candidate.version, objects: release.immutable.map((item) => item.artifact.objectKey) };
 }
 
-export async function snapshotRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+export async function snapshotRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
   settings({ accessKeyId, accessKeySecret, baseURL, bucket });
-  const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+  const release = loadCandidate(releaseRoot, expectedSourceCommit);
   const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
   if (current && !validEtag(current.etag)) throw new Error("current Bootstrap 缺少可用于条件恢复的 ETag");
-  if (current) previousBootstrapPayload(current.bytes, trust);
+  if (current) previousBootstrapPayload(current.bytes);
   const snapshot = {
     schemaVersion: 1,
     objectKey: OSS_BOOTSTRAP_KEY,
@@ -292,16 +282,16 @@ export async function snapshotRelease({ releaseRoot, snapshotPath, expectedSourc
   return { snapshotted: true, release: release.candidate.version, snapshot: file, previous: current ? snapshot.previous.sha256 : null };
 }
 
-export async function commitRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+export async function commitRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
   const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
   const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
   assertCurrentMatchesSnapshot(current, snapshot);
   const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
-  const nextPayload = verifySignedEnvelope(nextEnvelope, trust, "next Bootstrap");
+  const nextPayload = selfUsePayload(nextEnvelope, "next Bootstrap");
   if (current) {
-    const currentPayload = previousBootstrapPayload(current.bytes, trust);
+    const currentPayload = previousBootstrapPayload(current.bytes);
     const currentVersion = currentPayload?.release?.version;
     const nextVersion = nextPayload?.release?.version;
     const currentInstallerVersion = currentPayload?.installer?.version;
@@ -318,16 +308,16 @@ export async function commitRelease({ releaseRoot, snapshotPath, expectedSourceC
   return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
 }
 
-export async function confirmRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+export async function confirmRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
   const current = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
   if (!current?.equals(release.bootstrapBytes)) throw new Error("public OSS Bootstrap 与 candidate 不一致");
   return { confirmed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
 }
 
-export async function rollbackRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, releaseKeyId, releasePublicKey, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
-  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const trust = releaseTrust(releaseKeyId, releasePublicKey); const release = loadCandidate(releaseRoot, trust, expectedSourceCommit);
+export async function rollbackRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
+  const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
   const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
   if (!current?.bytes.equals(release.bootstrapBytes) || !validEtag(current.etag)) throw new Error("rollback 拒绝覆盖非本候选 Bootstrap");
@@ -347,7 +337,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const [mode, version] = process.argv.slice(2); const appVersion = JSON.parse(readFileSync(path.join(workspaceRoot, "app", "package.json"), "utf8")).version;
   try {
     if (!stableVersion.test(version) || version !== appVersion) throw new Error("version must match app/package.json");
-    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : frozenSourceCommit(), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET, releaseKeyId: process.env.TAURI_CODEX_RELEASE_KEY_ID, releasePublicKey: process.env.TAURI_CODEX_RELEASE_PUBLIC_KEY };
+    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : frozenSourceCommit(), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET };
     const result = mode === "preflight" ? await preflightPublisher(common) : mode === "stage" ? await stageRelease(common) : mode === "snapshot" ? await snapshotRelease(common) : mode === "commit" ? await commitRelease(common) : mode === "confirm" ? await confirmRelease(common) : mode === "rollback" ? await rollbackRelease(common) : null;
     if (!result) throw new Error("usage: publish:release:oss -- <preflight|stage|snapshot|commit|confirm|rollback> <version>");
     console.log(JSON.stringify(result, null, 2));
