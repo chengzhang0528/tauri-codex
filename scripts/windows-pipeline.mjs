@@ -61,6 +61,15 @@ function gitOutput(args) {
   return run("git", ["-C", workspaceRoot, ...args], { capture: true }).stdout.trim();
 }
 
+export function withRestoredFileBytes(filePath, action) {
+  const original = readFileSync(filePath);
+  try {
+    return action();
+  } finally {
+    writeFileSync(filePath, original);
+  }
+}
+
 export function dirtyWorktreeMessage(status) {
   const entries = status.trimEnd();
   return entries.trim() ? `self-use 候选必须从 clean Git worktree 构建。\n${entries}` : null;
@@ -212,7 +221,8 @@ function bootstrap() {
 
 function buildBinaries(toolchain) {
   const env = { ...toolchain.env, CARGO_TARGET_DIR: releaseCargoRoot };
-  run(process.execPath, [appScript, "build", "--no-bundle"], { env });
+  const cargoManifest = path.join(appRoot, "src-tauri", "Cargo.toml");
+  withRestoredFileBytes(cargoManifest, () => run(process.execPath, [appScript, "build", "--no-bundle"], { env }));
   run(toolchain.rustup, ["run", versions.rustToolchain, "cargo", "build", "--manifest-path", path.join(appRoot, "src-tauri", "Cargo.toml"), "--release", "--target", versions.rustTarget, "--bin", "tauri-codex-manager", "--features", "custom-protocol"], { env });
   for (const binary of [launcherSource, managerSource]) if (!existsSync(binary)) fail(`构建产物不存在：${binary}`);
   if (!existsSync(webviewLoaderSource)) fail("Manager 缺少 WebView2Loader.dll。");
@@ -310,9 +320,10 @@ function buildReleaseCandidate() {
   let installerLocalPath = null;
   if (shouldBuildInstaller()) {
     const originalBootstrap = readFileSync(bootstrapResource);
+    const cargoManifest = path.join(appRoot, "src-tauri", "Cargo.toml");
     try {
       writeJson(bootstrapResource, selfUseEnvelope(seedPayload));
-      runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv);
+      withRestoredFileBytes(cargoManifest, () => runNpm(["--prefix", appRoot, "run", "tauri", "--", "bundle", "--target", versions.rustTarget, "--bundles", "nsis"], buildEnv));
     } finally {
       writeFileSync(bootstrapResource, originalBootstrap);
     }

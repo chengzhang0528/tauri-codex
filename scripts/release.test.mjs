@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { dirtyWorktreeMessage, selfUseEnvelope, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
+import { dirtyWorktreeMessage, selfUseEnvelope, verifySelfUseEnvelope, withRestoredFileBytes } from "./windows-pipeline.mjs";
 import { nextPatchVersion, replaceVersion } from "./release.mjs";
 
 test("increments a stable patch version", () => {
@@ -53,6 +55,22 @@ test("frozen source diagnostics identify every dirty path without file contents"
   assert.equal(dirtyWorktreeMessage("\n"), null);
 });
 
+test("Tauri manifest rewrites restore the exact original bytes on failure", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "tauri-codex-manifest-"));
+  const manifest = path.join(root, "Cargo.toml");
+  const original = Buffer.from("[package]\r\nname = \"tauri-codex\"\r\n", "utf8");
+  try {
+    writeFileSync(manifest, original);
+    assert.throws(() => withRestoredFileBytes(manifest, () => {
+      writeFileSync(manifest, "[package]\nname = \"rewritten\"\n", "utf8");
+      throw new Error("bundle failed");
+    }), /bundle failed/);
+    assert.deepEqual(readFileSync(manifest), original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher event subscriptions are covered by the default capability", () => {
   const capability = JSON.parse(readFileSync(new URL("../app/src-tauri/capabilities/default.json", import.meta.url), "utf8"));
   const runtime = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
@@ -80,6 +98,7 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.match(pipeline, /minimumManagerVersion:\s*minimumManagerVersion/);
   assert.doesNotMatch(pipeline, /minimumManagerVersion:\s*appVersion/);
   assert.match(pipeline, /doctorFinalComponentArchives\(managerArchive, codexArchive\)/);
+  assert.equal(pipeline.match(/withRestoredFileBytes\(cargoManifest/g)?.length, 2);
   assert.ok(pipeline.indexOf("doctorFinalComponentArchives(managerArchive, codexArchive);") < pipeline.indexOf("const payload = {"));
   assert.match(pipeline, /tauri-codex-manager\.exe"\), \["--runtime-check"\]/);
   assert.match(pipeline, /codexEntry, "--version"/);
