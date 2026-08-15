@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
-import { selfUseEnvelope, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
+import { dirtyWorktreeMessage, selfUseEnvelope, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
 import { nextPatchVersion, replaceVersion } from "./release.mjs";
 
 test("increments a stable patch version", () => {
@@ -42,6 +42,15 @@ test("schema v3 makes the unsigned self-use policy explicit", () => {
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, schemaVersion: 2 }), /identity/);
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, releaseMode: "production" }), /identity/);
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, unexpected: true }), /identity/);
+});
+
+test("frozen source diagnostics identify every dirty path without file contents", () => {
+  const status = " M app/src-tauri/resources/bootstrap.json\n?? app/generated/output.txt";
+  const message = dirtyWorktreeMessage(status);
+  assert.match(message, / M app\/src-tauri\/resources\/bootstrap\.json/);
+  assert.match(message, /\?\? app\/generated\/output\.txt/);
+  assert.doesNotMatch(message, /schemaVersion|releaseMode/);
+  assert.equal(dirtyWorktreeMessage("\n"), null);
 });
 
 test("launcher event subscriptions are covered by the default capability", () => {

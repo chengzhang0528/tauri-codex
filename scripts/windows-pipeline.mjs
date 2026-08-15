@@ -61,8 +61,15 @@ function gitOutput(args) {
   return run("git", ["-C", workspaceRoot, ...args], { capture: true }).stdout.trim();
 }
 
+export function dirtyWorktreeMessage(status) {
+  const entries = status.trimEnd();
+  return entries.trim() ? `self-use 候选必须从 clean Git worktree 构建。\n${entries}` : null;
+}
+
 function frozenSource() {
-  if (gitOutput(["status", "--porcelain"])) fail("self-use 候选必须从 clean Git worktree 构建。");
+  const status = run("git", ["-C", workspaceRoot, "status", "--porcelain=v1", "--untracked-files=all"], { capture: true }).stdout;
+  const dirty = dirtyWorktreeMessage(status);
+  if (dirty) fail(dirty);
   const commit = gitOutput(["rev-parse", "HEAD"]);
   if (!/^[a-f0-9]{40}$/.test(commit)) fail("无法固定 source commit。");
   return commit;
