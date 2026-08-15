@@ -21,7 +21,7 @@ Depends On:
 - GitHub 只保存源码、tag、Release Notes 和 OSS 链接，不上传 binary asset。
 - schema v3 self-use 不兼容 schema v1/v2；本版本不构建 legacy Bootstrap 或旧 Launcher bridge。
 - Manager、Codex 与 Node 由同一个 self-use manifest 发布。Codex 不从 npm registry 做运行时更新。
-- tauri-codex 自有 Launcher、Manager 和 Installer 允许 unsigned，并在最终 bytes 上计算 size/SHA-256；Codex、Node 和 WebView2Loader 必须在冻结候选前通过上游 Authenticode。构建脚本不得为第三方二进制补签或把它降级为 unsigned。
+- tauri-codex 自有 Launcher、Manager 和 Installer 允许 unsigned，并在最终 bytes 上计算 size/SHA-256。Codex 必须在冻结候选前通过固定上游包版本、精确 Windows executable 闭包、安装树 SHA-256 和 CLI doctor，其中具备签名的 OpenAI 可执行文件还必须通过 Authenticode；固定闭包内的上游 `codex-path/rg.exe` 没有 Authenticode。Node 和 WebView2Loader 必须通过上游 Authenticode。构建脚本不得为第三方二进制补签或把要求签名的文件降级为 unsigned。
 - Installer/Launcher 行为变化时才递增 Installer 版本；普通 release 复用 OSS 上已发布且可匿名回读的稳定 Installer。
 
 ## 脚本
@@ -30,7 +30,7 @@ Depends On:
 |---|---|---|
 | `bootstrap` | 检查 Rust GNU/MSYS2，安装锁定依赖并准备固定 Codex/Node 构建输入 | 写入依赖目录与 `.codex-build/cache/` |
 | `build` | 编译未发布的 Windows x64 Launcher 和 Manager | 写入 `.codex-build/build/` 与 Tauri target |
-| `installer:build` | 从一个冻结 source/version 构建 self-use Launcher、Manager、Codex/Node components，对第三方输入执行 Authenticode 校验，对最终归档运行 Manager/Codex doctor，再生成 manifest、Bootstrap 和需要时的 NSIS | 写入 `.codex-build/releases/<version>/windows-x64/` |
+| `installer:build` | 从一个冻结 source/version 构建 self-use Launcher、Manager、Codex/Node components，验证 Codex 包闭包及具备签名的 OpenAI 文件、Node/WebView2Loader Authenticode，并对最终归档运行 Manager/Codex doctor，再生成 manifest、Bootstrap 和需要时的 NSIS | 写入 `.codex-build/releases/<version>/windows-x64/` |
 | `installer:verify` | 验证候选 identity、schema v3 self-use envelope、object key、size/SHA-256、组件闭包、Manager ZIP、角色限定 provenance 和冻结元数据 | 只读 |
 | `build:release` | 依次执行 bootstrap、候选构建与候选验证 | 只生成本地候选，不上传、不安装 |
 | `verify:release` | 对已有冻结候选重复验证，不重建同版本 | 只读 |
@@ -45,14 +45,14 @@ Depends On:
 
 ## self-use 输入与凭据
 
-self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/public key 或 timestamp URL。构建脚本调用已构建 Manager 内的 Windows WinVerifyTrust 校验 Codex、Node 与 WebView2Loader 已有的上游 Authenticode，不要求 `signtool.exe` 或 PowerShell Security module，也不签名 tauri-codex 自有文件。
+self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/public key 或 timestamp URL。构建脚本调用已构建 Manager：用固定 Codex executable 闭包区分上游包内具备签名的四个 OpenAI 文件和未签名的 `codex-path/rg.exe`，并用 Windows WinVerifyTrust 校验前者、Node MSI 与 WebView2Loader。该路径不要求 `signtool.exe` 或 PowerShell Security module，也不签名 tauri-codex 自有文件。
 
 只有 `publish`、`finalize` 与 `rollback` 的 OSS 操作使用 GitHub `oss-release` environment；写入操作要求 `ALIYUN_OSS_ACCESS_KEY_ID` 和 `ALIYUN_OSS_ACCESS_KEY_SECRET`。候选构建不进入该 environment，不读取 OSS 写凭据。所有 Secret 都不得写入仓库、artifact 或日志。
 
 ## 候选事务
 
 1. 固定 source commit、Manager version、Installer version、Codex version、Node version、schema v3 `self-use` mode 和 object keys。
-2. 清理当前版本输出后只构建一次。构建 unsigned Launcher/Manager，验证 Codex、Node 与 WebView2Loader 的上游 Authenticode，并生成最终 Manager/Codex/Node 归档；解开最终归档，实际执行 Manager `--runtime-check` 和 Codex `--version`。
+2. 清理当前版本输出后只构建一次。构建 unsigned Launcher/Manager，验证 Codex 固定包闭包和其中具备签名的 OpenAI 文件，并验证 Node 与 WebView2Loader 的上游 Authenticode，再生成最终 Manager/Codex/Node 归档；解开最终归档，实际执行 Manager `--runtime-check`、Codex `--version` 和闭包内 `rg --version`。
 3. 最终 doctor 通过后才计算组件 identity 并生成 self-use manifest；随后按需构建 unsigned Installer，生成最终 self-use Bootstrap，再写入 `candidate.json` 固定所有 bytes、size、SHA-256、source commit、mode 和路径。
 4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
 5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
@@ -81,7 +81,7 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 
 ## 故障处理
 
-- Codex、Node 或 WebView2Loader 缺少/未通过上游 Authenticode：停止候选构建；不得补签、跳过或降级为 self-use unsigned。
+- Codex 固定 executable 闭包不匹配、要求签名的 OpenAI 文件未通过 Authenticode，或 Node/WebView2Loader 未通过上游 Authenticode：停止候选构建；不得补签、任意跳过或降级为 self-use unsigned。
 - OSS preflight、上传或匿名回读失败：保留不可变对象供同候选重试，不提交 Bootstrap。
 - Bootstrap 提交后的公开安装验收失败：在 tag 创建前运行 `rollback`；若 Bootstrap 已被其他写入者改变，停止并人工判定，不做盲覆盖。
 - candidate metadata 与本地 bytes 不一致：停止并废弃该版本，不重建覆盖。

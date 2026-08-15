@@ -10,7 +10,7 @@ tauri-codex 是独立的社区项目，不是 OpenAI 官方产品，也不代表
 
 - 支持 Windows 10 22H2 x64 和 Windows 11 x64。
 - 不支持更早的 Windows、Windows ARM64、macOS 或 Linux；这些场景可以按[支持说明](SUPPORT.md)提交功能建议。
-- 应用启动和运行期间会从固定 OSS 检查显式 self-use release closure，并可下载、校验和暂存兼容的 Manager、Codex 与 Node 组件；自有二进制按 size/SHA-256 校验，Codex、Node 和 WebView2 组件继续校验上游 Authenticode。用户仍需明确点击激活更新，活动会话不会被自动中断。新版 Installer/Launcher 只显示 `setup-required`，必须由用户在应用外运行新版 Setup。
+- 应用启动和运行期间会从固定 OSS 检查显式 self-use release closure，并可下载、校验和暂存兼容的 Manager、Codex 与 Node 组件；自有二进制按 size/SHA-256 校验，Codex 按固定上游包、精确可执行闭包和安装树摘要校验，并继续验证包内具备签名的 OpenAI 可执行文件，Node 与 WebView2 继续校验上游 Authenticode。用户仍需明确点击激活更新，活动会话不会被自动中断。新版 Installer/Launcher 只显示 `setup-required`，必须由用户在应用外运行新版 Setup。
 - Bug、兼容性问题和使用反馈通过 GitHub Issues 跟踪，提交入口和必要信息见[支持说明](SUPPORT.md)。
 - 安全漏洞不要公开披露，按[安全政策](SECURITY.md)报告。
 

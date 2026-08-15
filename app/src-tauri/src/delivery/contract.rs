@@ -9,7 +9,8 @@ pub const SCHEMA_VERSION: u32 = 3;
 pub const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
 pub const SELF_USE_PROVENANCE: &str = "unsigned-self-use+sha256";
-pub const UPSTREAM_PROVENANCE: &str = "upstream-authenticode+sha256";
+pub const CODEX_PROVENANCE: &str = "upstream-package+sha256";
+pub const UPSTREAM_AUTHENTICODE_PROVENANCE: &str = "upstream-authenticode+sha256";
 pub const METADATA_PROVENANCE: &str = "self-use+sha256";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,7 +272,8 @@ pub fn validate_manifest(manifest: &Manifest, bootstrap: &BootstrapPayload) -> R
         }
         let expected_provenance = match component.id {
             ComponentId::Manager => SELF_USE_PROVENANCE,
-            ComponentId::Codex | ComponentId::Node => UPSTREAM_PROVENANCE,
+            ComponentId::Codex => CODEX_PROVENANCE,
+            ComponentId::Node => UPSTREAM_AUTHENTICODE_PROVENANCE,
         };
         if component.provenance != component.artifact.provenance
             || component.provenance != expected_provenance
@@ -439,7 +441,8 @@ mod tests {
     use super::{
         artifact_url, newer, validate_manifest, validate_object_key, verify_release_envelope,
         Artifact, BootstrapPayload, Component, ComponentId, ManifestPayload, ReleaseEnvelope,
-        ReleaseMode, ReleaseRef, METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_PROVENANCE,
+        ReleaseMode, ReleaseRef, CODEX_PROVENANCE, METADATA_PROVENANCE, SELF_USE_PROVENANCE,
+        UPSTREAM_AUTHENTICODE_PROVENANCE,
     };
     use serde_json::json;
 
@@ -499,7 +502,8 @@ mod tests {
         };
         let provenance = match &id {
             ComponentId::Manager => SELF_USE_PROVENANCE,
-            ComponentId::Codex | ComponentId::Node => UPSTREAM_PROVENANCE,
+            ComponentId::Codex => CODEX_PROVENANCE,
+            ComponentId::Node => UPSTREAM_AUTHENTICODE_PROVENANCE,
         };
         Component {
             id,
@@ -610,5 +614,23 @@ mod tests {
         weakened.payload.components[1].provenance = SELF_USE_PROVENANCE.to_string();
         weakened.payload.components[1].artifact.provenance = SELF_USE_PROVENANCE.to_string();
         assert!(validate_manifest(&weakened, &self_use_bootstrap().payload).is_err());
+
+        let mut overstated = self_use_manifest(ManifestPayload {
+            product: "tauri-codex".to_string(),
+            version: "0.2.0".to_string(),
+            platform: "windows".to_string(),
+            architecture: "x86_64".to_string(),
+            minimum_launcher_version: "1.1.0".to_string(),
+            minimum_manager_version: "0.2.0".to_string(),
+            components: vec![
+                component(ComponentId::Manager, Some("b".repeat(64))),
+                component(ComponentId::Codex, Some("c".repeat(64))),
+                component(ComponentId::Node, None),
+            ],
+        });
+        overstated.payload.components[1].provenance = UPSTREAM_AUTHENTICODE_PROVENANCE.to_string();
+        overstated.payload.components[1].artifact.provenance =
+            UPSTREAM_AUTHENTICODE_PROVENANCE.to_string();
+        assert!(validate_manifest(&overstated, &self_use_bootstrap().payload).is_err());
     }
 }

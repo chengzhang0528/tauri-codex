@@ -41,6 +41,10 @@ pub fn verify_release_authenticode(path: &std::path::Path) -> Result<(), String>
     health::verify_authenticode(path)
 }
 
+pub fn verify_release_codex_component(root: &std::path::Path) -> Result<(), String> {
+    health::verify_codex_executable_provenance(root)
+}
+
 pub fn current_release_path(root: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
     activation::current_release_path(root)
 }

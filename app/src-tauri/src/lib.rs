@@ -41,36 +41,56 @@ where
     let _ = app.emit_to("main", &event, payload);
 }
 
-fn authenticode_verification_path(
+#[derive(Debug, PartialEq, Eq)]
+enum ManagerVerificationAction {
+    Authenticode(std::path::PathBuf),
+    CodexComponent(std::path::PathBuf),
+}
+
+fn manager_verification_action(
     args: &[std::ffi::OsString],
-) -> Result<Option<std::path::PathBuf>, String> {
-    if args.first().and_then(|arg| arg.to_str()) != Some("--verify-authenticode") {
+) -> Result<Option<ManagerVerificationAction>, String> {
+    let Some(flag @ ("--verify-authenticode" | "--verify-codex-component")) =
+        args.first().and_then(|arg| arg.to_str())
+    else {
         return Ok(None);
-    }
+    };
     if args.len() != 2 {
-        return Err("--verify-authenticode 必须且只能接收一个绝对路径".to_string());
+        return Err(format!("{flag} 必须且只能接收一个绝对路径"));
     }
     let path = std::path::PathBuf::from(&args[1]);
     if !path.is_absolute() {
-        return Err("--verify-authenticode 只接受绝对路径".to_string());
+        return Err(format!("{flag} 只接受绝对路径"));
     }
-    Ok(Some(path))
+    Ok(Some(match flag {
+        "--verify-authenticode" => ManagerVerificationAction::Authenticode(path),
+        "--verify-codex-component" => ManagerVerificationAction::CodexComponent(path),
+        _ => unreachable!(),
+    }))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run_manager() {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    match authenticode_verification_path(&args) {
-        Ok(Some(path)) => {
-            if let Err(error) = delivery::verify_release_authenticode(&path) {
-                eprintln!("Authenticode verification failed: {error}");
+    match manager_verification_action(&args) {
+        Ok(Some(action)) => {
+            let result = match action {
+                ManagerVerificationAction::Authenticode(path) => {
+                    delivery::verify_release_authenticode(&path)
+                }
+                ManagerVerificationAction::CodexComponent(root) => {
+                    delivery::verify_release_codex_component(&root)
+                }
+            };
+            if let Err(error) = result {
+                eprintln!("Release verification failed: {error}");
                 std::process::exit(1);
             }
             return;
         }
         Ok(None) => {}
         Err(error) => {
-            eprintln!("Authenticode verification failed: {error}");
+            eprintln!("Release verification failed: {error}");
             std::process::exit(1);
         }
     }
@@ -241,31 +261,38 @@ mod tests {
 
 #[cfg(test)]
 mod argument_tests {
-    use super::authenticode_verification_path;
+    use super::{manager_verification_action, ManagerVerificationAction};
     use std::ffi::OsString;
 
     #[test]
-    fn authenticode_verification_requires_one_absolute_path() {
+    fn manager_verification_requires_one_absolute_path() {
         let path = std::env::current_dir().unwrap().join("signed.exe");
         assert_eq!(
-            authenticode_verification_path(&[
+            manager_verification_action(&[
                 OsString::from("--verify-authenticode"),
                 path.clone().into_os_string(),
             ]),
-            Ok(Some(path))
+            Ok(Some(ManagerVerificationAction::Authenticode(path.clone())))
+        );
+        assert_eq!(
+            manager_verification_action(&[
+                OsString::from("--verify-codex-component"),
+                path.clone().into_os_string(),
+            ]),
+            Ok(Some(ManagerVerificationAction::CodexComponent(path)))
         );
         assert!(
-            authenticode_verification_path(&[OsString::from("--verify-authenticode")])
+            manager_verification_action(&[OsString::from("--verify-authenticode")])
                 .unwrap_err()
                 .contains("一个绝对路径")
         );
-        assert!(authenticode_verification_path(&[
+        assert!(manager_verification_action(&[
             OsString::from("--verify-authenticode"),
             OsString::from("signed.exe"),
         ])
         .unwrap_err()
         .contains("绝对路径"));
-        assert!(authenticode_verification_path(&[
+        assert!(manager_verification_action(&[
             OsString::from("--verify-authenticode"),
             OsString::from("C:\\signed.exe"),
             OsString::from("unexpected"),

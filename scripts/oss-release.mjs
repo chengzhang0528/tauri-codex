@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_PROVENANCE, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
+import { CODEX_PROVENANCE, METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_AUTHENTICODE_PROVENANCE, verifySelfUseEnvelope } from "./windows-pipeline.mjs";
 
 export const OSS_BASE_URL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 export const OSS_BUCKET = "shared-public-assets";
@@ -116,7 +116,7 @@ function validateManifestPayload(manifest, candidate) {
     if (!component || !expected[component.id] || ids.has(component.id)) throw new Error("manifest component ID 不唯一或未知");
     ids.add(component.id);
     const [kind, archive, installPath] = expected[component.id];
-    const expectedProvenance = component.id === "manager" ? SELF_USE_PROVENANCE : UPSTREAM_PROVENANCE;
+    const expectedProvenance = component.id === "manager" ? SELF_USE_PROVENANCE : component.id === "codex" ? CODEX_PROVENANCE : UPSTREAM_AUTHENTICODE_PROVENANCE;
     if (!stableVersion.test(component.version) || component.kind !== kind || component.archive !== archive || component.installPath !== installPath || component.required !== true || component.provenance !== expectedProvenance) throw new Error(`manifest ${component.id} 规则无效`);
     if ((component.id === "manager" || component.id === "codex") && !digestPattern.test(component.installedTreeSha256)) throw new Error(`manifest ${component.id} 安装树 SHA-256 无效`);
     if (component.id === "node" && component.installedTreeSha256 != null) throw new Error("manifest node 不得声明安装树 SHA-256");
@@ -198,7 +198,7 @@ function loadCandidate(releaseRoot, expectedSourceCommit) {
   for (const role of ["manager", "codex", "node"]) {
     const item = immutable.find((entry) => entry.role === role);
     const component = manifest.components?.find((entry) => entry.id === role && entry.required === true);
-    const expectedProvenance = role === "manager" ? SELF_USE_PROVENANCE : UPSTREAM_PROVENANCE;
+    const expectedProvenance = role === "manager" ? SELF_USE_PROVENANCE : role === "codex" ? CODEX_PROVENANCE : UPSTREAM_AUTHENTICODE_PROVENANCE;
     if (!component || component.artifact.provenance !== expectedProvenance || !sameArtifact(component.artifact, item.artifact)) throw new Error(`manifest ${role} closure 与 candidate 不一致`);
   }
   return { candidate, bootstrapBytes, immutable };

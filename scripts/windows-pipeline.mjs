@@ -34,7 +34,8 @@ const MANAGER_FILES = ["tauri-codex-manager.exe", "WebView2Loader.dll"];
 export const RELEASE_SCHEMA_VERSION = 3;
 export const RELEASE_MODE = "self-use";
 export const SELF_USE_PROVENANCE = "unsigned-self-use+sha256";
-export const UPSTREAM_PROVENANCE = "upstream-authenticode+sha256";
+export const CODEX_PROVENANCE = "upstream-package+sha256";
+export const UPSTREAM_AUTHENTICODE_PROVENANCE = "upstream-authenticode+sha256";
 export const METADATA_PROVENANCE = "self-use+sha256";
 
 export function selfUseEnvelope(payload) {
@@ -97,6 +98,7 @@ function toolchainEnvironment() {
 }
 
 function verifyAuthenticode(filePath) { run(managerSource, ["--verify-authenticode", filePath]); }
+function verifyCodexComponent(root) { run(managerSource, ["--verify-codex-component", root]); }
 function filesBelow(root) {
   const files = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
@@ -184,6 +186,9 @@ function doctorFinalComponentArchives(managerArchive, codexArchive) {
     if (!output.split(/\s+/).includes(versions.codexVersion)) {
       fail(`最终 Codex component 版本不匹配：${output || "无输出"}`);
     }
+    const rgEntry = path.join(codexRoot, "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "codex-path", "rg.exe");
+    const rgOutput = run(rgEntry, ["--version"], { cwd: codexRoot, capture: true }).stdout.trim();
+    if (!rgOutput.startsWith("ripgrep ")) fail(`最终 Codex component rg doctor 失败：${rgOutput || "无输出"}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -213,9 +218,7 @@ function prepareComponents() {
   const codexRoot = path.join(appRoot, "src-tauri", "resources", "codex");
   const nodeMsi = path.join(appRoot, "src-tauri", "resources", "node", `node-v${versions.nodeVersion}-x64.msi`);
   if (!existsSync(path.join(codexRoot, "node_modules", "@openai", "codex", "package.json")) || !existsSync(nodeMsi)) fail("Codex/Node 构建输入不完整，请先运行 bootstrap。");
-  const codexExecutables = filesBelow(codexRoot).filter((file) => path.extname(file).toLowerCase() === ".exe");
-  if (codexExecutables.length === 0) fail("Codex 构建输入不包含 Windows executable。");
-  for (const executable of codexExecutables) verifyAuthenticode(executable);
+  verifyCodexComponent(codexRoot);
   verifyAuthenticode(nodeMsi);
   const managerArchive = path.join(componentRoot, `tauri-codex-manager-${appVersion}-windows-x64.zip`);
   const codexArchive = path.join(componentRoot, `tauri-codex-codex-${versions.codexVersion}-windows-x64.zip`);
@@ -234,8 +237,8 @@ function prepareComponents() {
     minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,
     components: [
       { id: "manager", version: appVersion, kind: "archive", archive: "zip", required: true, installPath: "manager", provenance: SELF_USE_PROVENANCE, installedTreeSha256: managerTreeSha256, artifact: objectArtifact(managerArchive, componentKey(path.basename(managerArchive)), SELF_USE_PROVENANCE) },
-      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: UPSTREAM_PROVENANCE, installedTreeSha256: codexTreeSha256, artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), UPSTREAM_PROVENANCE) },
-      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: UPSTREAM_PROVENANCE, installedTreeSha256: null, artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), UPSTREAM_PROVENANCE) },
+      { id: "codex", version: versions.codexVersion, kind: "archive", archive: "zip", required: true, installPath: "codex", provenance: CODEX_PROVENANCE, installedTreeSha256: codexTreeSha256, artifact: objectArtifact(codexArchive, componentKey(path.basename(codexArchive)), CODEX_PROVENANCE) },
+      { id: "node", version: versions.nodeVersion, kind: "system", archive: "msi", required: true, installPath: "system", provenance: UPSTREAM_AUTHENTICODE_PROVENANCE, installedTreeSha256: null, artifact: objectArtifact(nodeAsset, componentKey(path.basename(nodeAsset)), UPSTREAM_AUTHENTICODE_PROVENANCE) },
     ],
   };
   const envelope = selfUseEnvelope(payload);

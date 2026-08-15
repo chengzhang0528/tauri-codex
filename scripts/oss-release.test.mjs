@@ -66,7 +66,7 @@ function fixture(version = "0.2.0", installerVersion = "1.1.0", options = {}) {
   };
   const records = {
     manager: artifact(`releases/${version}/windows-x64/components/${names.manager}`, blobs.manager, "unsigned-self-use+sha256"),
-    codex: artifact(`releases/${version}/windows-x64/components/${names.codex}`, blobs.codex, options.codexProvenance ?? "upstream-authenticode+sha256"),
+    codex: artifact(`releases/${version}/windows-x64/components/${names.codex}`, blobs.codex, options.codexProvenance ?? "upstream-package+sha256"),
     node: artifact(`releases/${version}/windows-x64/components/${names.node}`, blobs.node, "upstream-authenticode+sha256"),
     installer: artifact(`installers/${installerVersion}/windows-x64/${names.installer}`, blobs.installer, "unsigned-self-use+sha256"),
   };
@@ -213,13 +213,15 @@ test("stages immutable objects without moving Bootstrap", async () => {
 });
 
 test("self-use policy does not weaken third-party provenance", async () => {
-  const release = fixture("0.2.0", "1.1.0", { codexProvenance: "unsigned-self-use+sha256" });
-  const remote = fakeFetch();
-  try {
-    await assert.rejects(() => stageRelease(publishOptions(release, remote)), /manifest codex 规则无效/);
-    assert.equal(remote.events.length, 0);
-  } finally {
-    rmSync(release.root, { recursive: true, force: true });
+  for (const codexProvenance of ["unsigned-self-use+sha256", "upstream-authenticode+sha256"]) {
+    const release = fixture("0.2.0", "1.1.0", { codexProvenance });
+    const remote = fakeFetch();
+    try {
+      await assert.rejects(() => stageRelease(publishOptions(release, remote)), /manifest codex 规则无效/);
+      assert.equal(remote.events.length, 0);
+    } finally {
+      rmSync(release.root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -74,7 +74,9 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.ok(pipeline.indexOf("doctorFinalComponentArchives(managerArchive, codexArchive);") < pipeline.indexOf("const payload = {"));
   assert.match(pipeline, /tauri-codex-manager\.exe"\), \["--runtime-check"\]/);
   assert.match(pipeline, /codexEntry, "--version"/);
+  assert.match(pipeline, /rgEntry, \["--version"\]/);
   assert.match(pipeline, /managerSource, \["--verify-authenticode", filePath\]/);
+  assert.match(pipeline, /managerSource, \["--verify-codex-component", root\]/);
   assert.doesNotMatch(pipeline, /signtool|findSignTool/i);
   assert.doesNotMatch(pipeline, /Get-AuthenticodeSignature|Microsoft\.PowerShell\.Security/);
   assert.doesNotMatch(pipeline, /probePublishedInstaller\(\)[\s\S]{0,800}catch\s*\{/);
@@ -88,7 +90,8 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
   const launcher = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(health, /root\.join\("WebView2Loader\.dll"\)/);
   assert.match(health, /verify_authenticode\(&root\.join\("WebView2Loader\.dll"\)\)/);
-  assert.match(health, /doctor_codex[\s\S]*verify_authenticode_tree\(root\)/);
+  assert.match(health, /doctor_codex[\s\S]*verify_codex_executable_provenance\(root\)/);
+  assert.match(health, /CODEX_PACKAGE_EXECUTABLES[\s\S]*codex-path\/rg\.exe", false/);
   assert.match(broker, /automatic_cycle\(&automatic\)/);
   assert.match(broker, /UpdateIntent::Prepare/);
   assert.match(broker, /UpdateState::SetupRequired/);

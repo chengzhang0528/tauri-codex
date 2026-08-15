@@ -5,6 +5,15 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_VENDOR_ROOT: &str =
+    "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc";
+const CODEX_PACKAGE_EXECUTABLES: &[(&str, bool)] = &[
+    ("bin/codex-code-mode-host.exe", true),
+    ("bin/codex.exe", true),
+    ("codex-path/rg.exe", false),
+    ("codex-resources/codex-command-runner.exe", true),
+    ("codex-resources/codex-windows-sandbox-setup.exe", true),
+];
 
 pub fn doctor_system_node(minimum: &str) -> Result<std::path::PathBuf, String> {
     let mut failures = Vec::new();
@@ -44,7 +53,13 @@ pub fn doctor_manager(root: &Path, system_node: &Path) -> Result<(), String> {
 
 pub fn doctor_codex(root: &Path, system_node: &Path) -> Result<(), String> {
     let entry = codex_entry(root)?;
-    verify_authenticode_tree(root)?;
+    verify_codex_executable_provenance(root)?;
+    let rg = root.join(CODEX_VENDOR_ROOT).join("codex-path/rg.exe");
+    run_success(
+        job::background_command(rg).arg("--version"),
+        DOCTOR_TIMEOUT,
+        "Codex rg doctor",
+    )?;
     let smoke_home = root.join(format!(".doctor-home-{}", uuid::Uuid::new_v4().simple()));
     fs::create_dir_all(&smoke_home).map_err(|error| error.to_string())?;
     let result = run_success(
@@ -60,9 +75,9 @@ pub fn doctor_codex(root: &Path, system_node: &Path) -> Result<(), String> {
     result
 }
 
-pub fn verify_authenticode_tree(root: &Path) -> Result<(), String> {
+fn codex_signed_executables(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let mut pending = vec![root.to_path_buf()];
-    let mut executable_count = 0usize;
+    let mut actual = Vec::new();
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
@@ -83,16 +98,50 @@ pub fn verify_authenticode_tree(root: &Path) -> Result<(), String> {
                     extension.eq_ignore_ascii_case("exe") || extension.eq_ignore_ascii_case("dll")
                 })
             {
-                executable_count += 1;
-                verify_authenticode(&entry.path())?;
+                actual.push(entry.path());
             }
         }
     }
-    if executable_count == 0 {
+    actual.sort();
+    let mut expected = CODEX_PACKAGE_EXECUTABLES
+        .iter()
+        .map(|(relative, _)| root.join(CODEX_VENDOR_ROOT).join(relative))
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        let relative = |path: &Path| {
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
         return Err(format!(
-            "Codex 组件不包含 Windows executable：{}",
-            root.display()
+            "Codex Windows executable 闭包不匹配，expected=[{}] actual=[{}]",
+            expected
+                .iter()
+                .map(|path| relative(path))
+                .collect::<Vec<_>>()
+                .join(", "),
+            actual
+                .iter()
+                .map(|path| relative(path))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
+    }
+    for path in &expected {
+        require_nonempty(path, "Codex Windows executable")?;
+    }
+    Ok(CODEX_PACKAGE_EXECUTABLES
+        .iter()
+        .filter(|(_, requires_authenticode)| *requires_authenticode)
+        .map(|(relative, _)| root.join(CODEX_VENDOR_ROOT).join(relative))
+        .collect())
+}
+
+pub fn verify_codex_executable_provenance(root: &Path) -> Result<(), String> {
+    for executable in codex_signed_executables(root)? {
+        verify_authenticode(&executable)?;
     }
     Ok(())
 }
@@ -197,5 +246,43 @@ fn verify_authenticode_windows(path: &Path) -> Result<(), String> {
                 status
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{codex_signed_executables, CODEX_PACKAGE_EXECUTABLES, CODEX_VENDOR_ROOT};
+    use std::fs;
+
+    #[test]
+    fn codex_executable_inventory_is_exact_and_keeps_unsigned_rg_out_of_signature_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-health-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        for (relative, _) in CODEX_PACKAGE_EXECUTABLES {
+            let path = root.join(CODEX_VENDOR_ROOT).join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"fixture").unwrap();
+        }
+
+        let signed = codex_signed_executables(&root).unwrap();
+        assert_eq!(signed.len(), 4);
+        assert!(signed.iter().all(|path| path.is_file()));
+        assert!(signed.iter().all(|path| !path.ends_with("rg.exe")));
+
+        let unexpected = root.join(CODEX_VENDOR_ROOT).join("bin/unexpected.dll");
+        fs::write(&unexpected, b"fixture").unwrap();
+        assert!(codex_signed_executables(&root)
+            .unwrap_err()
+            .contains("闭包不匹配"));
+        fs::remove_file(unexpected).unwrap();
+
+        let rg = root.join(CODEX_VENDOR_ROOT).join("codex-path/rg.exe");
+        fs::remove_file(rg).unwrap();
+        assert!(codex_signed_executables(&root)
+            .unwrap_err()
+            .contains("闭包不匹配"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -65,7 +65,7 @@ flowchart LR
 ### NSIS Setup 与 Launcher
 
 - NSIS 只安装稳定 Launcher、图标、self-use Bootstrap seed 和许可证；不携带 Manager、Codex 或 Node payload。Launcher 只从固定 `shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex/` OSS 根读取精确 object key。
-- Launcher 只接受 schema v3、`releaseMode: self-use` 的 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定 OSS object key 下载，校验 size/SHA-256/角色限定 provenance、解包并 doctor 通过后才进入 staging。自有 Launcher、Manager、Installer 允许 unsigned；Codex、Node 与 WebView2Loader 仍校验上游 Authenticode。
+- Launcher 只接受 schema v3、`releaseMode: self-use` 的 Bootstrap 与 release manifest，探测并复用合格系统组件；缺失组件只从清单固定 OSS object key 下载，校验 size/SHA-256/角色限定 provenance、解包并 doctor 通过后才进入 staging。自有 Launcher、Manager、Installer 允许 unsigned；Codex 以固定上游包、精确 Windows 可执行闭包、安装树 SHA-256 和 CLI doctor 为完整组件来源，并对包内具备签名的 OpenAI 可执行文件校验 Authenticode；Node 与 WebView2Loader 仍校验上游 Authenticode。
 - 不把 Codex 安装到系统全局 npm，也不承担运行时 session 管理；准备完成后启动 Tauri Manager。
 - Launcher 在 Manager 存活期间保持为隐藏 Broker，通过当前用户受限 Named Pipe 接受更新意图；Manager 不持有组件文件或安装行为。
 
@@ -129,6 +129,6 @@ Codex TUI 是 session 和聊天显示的唯一所有者。应用不使用 app-se
 
 ## 发布与官方文档获取边界
 
-- 桌面 self-use 发布先冻结 source commit、schema/mode、对象 identity，并验证 Codex、Node 与 WebView2Loader 的上游 Authenticode；随后验证 `oss-release` 环境、项目 OSS 写入和匿名回读，将同一不可变闭包上传并完整匿名回读到项目 OSS 前缀，最后提交 OSS Bootstrap。GitHub tag/Release Notes 只能在 OSS closure 可读后创建，下载链接指向 OSS 且不得上传二进制。前置失败不得公开版本，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
+- 桌面 self-use 发布先冻结 source commit、schema/mode、对象 identity，验证 Codex 固定上游包的精确可执行闭包及其中具备签名的 OpenAI 文件，并验证 Node 与 WebView2Loader 的上游 Authenticode；随后验证 `oss-release` 环境、项目 OSS 写入和匿名回读，将同一不可变闭包上传并完整匿名回读到项目 OSS 前缀，最后提交 OSS Bootstrap。GitHub tag/Release Notes 只能在 OSS closure 可读后创建，下载链接指向 OSS 且不得上传二进制。前置失败不得公开版本，后置失败不得移动旧 Bootstrap；重试只能复用同一候选和不可变对象。
 - 官方 Codex 文档查询使用工作区 skill [official-codex-docs](../../../../.agents/skills/official-codex-docs/SKILL.md)，保留 `developers.openai.com` 官方 URL；Windows helper 依次使用显式 `CODEX_DOCS_PROXY`、`localhost:1080`、`127.0.0.1:1080`，最后直连 HTTPS。
 - 该代理只用于开发资料抓取，不注入应用、Codex、更新器或用户会话。
