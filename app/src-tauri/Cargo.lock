@@ -3503,7 +3503,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tiny_http",
- "toml 0.8.2",
+ "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.20.2",
  "uuid",
  "windows",
