@@ -41,6 +41,7 @@ Depends On:
 | `publish:release:oss -- confirm <version>` | 匿名回读不可变 closure 与 Bootstrap，确认与候选逐字节一致 | 只读 |
 | `publish:release:oss -- rollback <version>` | 取得同一固定 lock object，锁内确认当前仍等于本候选后普通恢复/删除快照并回读 | 改变 OSS Bootstrap 与短时 lock object |
 | `release:patch` | 计算下一 Manager patch；Installer 版本保持独立 | 修改版本源，仍不发布 |
+| `release:installer:patch` | Launcher/Installer 行为变化时计算下一 Installer patch，并把当前 Manager 写为最低版本 | 修改 Installer 版本源，仍不发布 |
 | `test:rust` / `test` | 运行 Development 白盒门禁 | 只写入忽略的构建缓存 |
 
 ## self-use 输入与凭据
@@ -52,7 +53,7 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 ## 候选事务
 
 1. 固定 source commit、Manager version、Installer version、Codex version、Node version、schema v3 `self-use` mode 和 object keys。
-2. 清理当前版本输出后只构建一次。构建 unsigned Launcher/Manager，验证 Codex 固定包闭包和其中具备签名的 OpenAI 文件，并验证 Node 与 WebView2Loader 的上游 Authenticode，再生成最终 Manager/Codex/Node 归档；解开最终归档，实际执行 Manager `--runtime-check`、Codex `--version` 和闭包内 `rg --version`。
+2. 清理当前版本输出后只构建一次。构建 Node 必须不低于 manifest 固定 Node 版本；构建 unsigned Launcher/Manager，验证 Codex 固定包闭包和其中具备签名的 OpenAI 文件，并验证 Node 与 WebView2Loader 的上游 Authenticode。Manager/Codex ZIP 只写入文件相对路径，不允许 `.` 根；候选 Manager 以 `--verify-component-archive` 调用生产 Rust 安全解包器验证最终 ZIP，再实际执行 Manager `--runtime-check`、Codex `--version` 和闭包内 `rg --version`。
 3. 最终 doctor 通过后才计算组件 identity 并生成 self-use manifest；随后按需构建 unsigned Installer，生成最终 self-use Bootstrap，再写入 `candidate.json` 固定所有 bytes、size、SHA-256、source commit、mode 和路径。
 4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
 5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
@@ -69,13 +70,14 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 - Cargo 必须显式产出 `tauri-codex.exe` Launcher 和 `tauri-codex-manager.exe` Manager。
 - Manager ZIP 必须包含非空 `tauri-codex-manager.exe` 与同目录 `WebView2Loader.dll`。
 - 最终 Manager/Codex 归档必须在 manifest 和 `candidate.json` 冻结前通过 Manager `--runtime-check` 与 Codex `--version`；依赖准备阶段的缓存命中不代替该检查。
+- 最终组件 ZIP 必须在 manifest 和 `candidate.json` 冻结前通过生产 Rust 解包器；tar 自己能够列出或解开归档不构成 Launcher 可安装证据。
 - NSIS 必须嵌入 schema v3 self-use Bootstrap seed、许可证与 Installer-owned 资源，不携带 Manager/Codex/Node payload。
 - 稳定 Installer 复用时从 OSS immutable object 读取并验证，禁止从 GitHub 下载或依赖本地旧文件。
 - 首次公开新构建图前必须至少完成一次仅保留依赖缓存的 clean-output build。
 
 ## GitHub Workflow
 
-`windows-release.yml` 只接受受保护的 `workflow_dispatch`，并把同一冻结候选分成四种可恢复操作：`candidate` 只构建并保留 14 天 artifact；`publish` 通过 candidate run ID 下载该候选，执行 preflight、stage、snapshot 和 commit；发布/回滚 job 从当前 workflow commit 读取修复后的发布器，同时通过 `TAURI_CANDIDATE_SOURCE_COMMIT` 继续校验候选冻结 source commit；`finalize` 在独立公开安装验收通过后再次确认 OSS identity，再创建 GitHub tag/Release Notes；`rollback` 通过 candidate run ID 与 publish run ID 恢复提交前快照。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
+`windows-release.yml` 只接受受保护的 `workflow_dispatch`，版本从冻结 `source_commit` 的 `app/package.json` 解析，不要求操作者重复输入。Workflow 把同一冻结候选分成四种可恢复操作：`candidate` 只构建并保留 14 天 artifact；`publish` 通过 candidate run ID 下载该候选，执行 preflight、stage、snapshot 和 commit；发布/回滚 job 从当前 workflow commit 读取修复后的发布器，同时通过 `TAURI_CANDIDATE_SOURCE_COMMIT` 继续校验候选冻结 source commit；`finalize` 在独立公开安装验收通过后再次确认 OSS identity，再创建 GitHub tag/Release Notes；`rollback` 通过 candidate run ID 与 publish run ID 恢复提交前快照。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
 
 本 Runbook 不构成 Deployment 授权。向 OSS 写对象、移动 Bootstrap 或公开 Release Notes 必须由单独授权的 Deployment 执行。
 

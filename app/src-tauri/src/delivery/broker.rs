@@ -799,6 +799,7 @@ pub fn start_launcher_setup(app: AppHandle, state: &LauncherState) -> Result<(),
 
 fn initial_setup(app: &AppHandle) -> Result<(), String> {
     let root = paths::delivery_root()?;
+    activation::retire_incompatible_state(&root)?;
     activation::recover_pending(&root)?;
     let bootstrap = read_bootstrap_remote()?;
     contract::validate_bootstrap(&bootstrap)?;
@@ -1095,7 +1096,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_manager_version_supported, select_target};
+    use super::{ensure_manager_version_supported, include_minimum_manager_version, select_target};
     use crate::delivery::contract::{
         Artifact, Bootstrap, BootstrapPayload, InstallerRef, ReleaseMode, ReleaseRef, UpdateTarget,
         METADATA_PROVENANCE, SELF_USE_PROVENANCE,
@@ -1161,7 +1162,8 @@ mod tests {
 
     #[test]
     fn compiled_launcher_minimum_rejects_an_older_manager() {
-        assert!(ensure_manager_version_supported(Some("0.1.9")).is_err());
-        assert!(ensure_manager_version_supported(Some("0.2.0")).is_ok());
+        let minimum = include_minimum_manager_version().unwrap();
+        assert!(ensure_manager_version_supported(Some("0.0.0")).is_err());
+        assert!(ensure_manager_version_supported(Some(&minimum)).is_ok());
     }
 }

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { dirtyWorktreeMessage, selfUseEnvelope, verifySelfUseEnvelope, withRestoredFileBytes } from "./windows-pipeline.mjs";
-import { nextPatchVersion, replaceVersion } from "./release.mjs";
+import { archiveEntries, createArchive, dirtyWorktreeMessage, normalizedArchiveEntry, selfUseEnvelope, verifySelfUseEnvelope, withRestoredFileBytes } from "./windows-pipeline.mjs";
+import { nextPatchVersion, prepareInstallerVersionValues, replaceCargoPackageVersion, replaceExact, replaceVersion } from "./release.mjs";
 
 test("increments a stable patch version", () => {
   assert.equal(nextPatchVersion("0.2.0"), "0.2.1");
@@ -16,19 +16,44 @@ test("updates one version marker without changing surrounding text", () => {
   assert.throws(() => replaceVersion('{"version":"0.2.0","other":"0.2.0"}', "0.2.0", "0.2.1", "fixture"));
 });
 
+test("updates exact release consumers and rejects version drift", () => {
+  assert.equal(replaceExact("before v0.2.0 after", "v0.2.0", "v0.2.1", "fixture"), "before v0.2.1 after");
+  assert.throws(() => replaceExact("v0.2.0 v0.2.0", "v0.2.0", "v0.2.1", "fixture"));
+  assert.equal(
+    replaceCargoPackageVersion('[[package]]\r\nname = "tauri-codex"\r\nversion = "0.2.0"\r\n', "0.2.0", "0.2.1"),
+    '[[package]]\r\nname = "tauri-codex"\r\nversion = "0.2.1"\r\n',
+  );
+  const values = prepareInstallerVersionValues(
+    { schemaVersion: 2, installerVersion: "1.1.0", minimumManagerVersion: "0.2.0", publishedArtifact: { sha256: "old" } },
+    { version: "1.1.0", bundle: {} },
+    "0.2.1",
+  );
+  assert.equal(values.next, "1.1.1");
+  assert.deepEqual(values.installer, { schemaVersion: 2, installerVersion: "1.1.1", minimumManagerVersion: "0.2.1", publishedArtifact: null });
+  assert.equal(values.tauri.version, "1.1.1");
+  assert.throws(() => prepareInstallerVersionValues(
+    { schemaVersion: 2, installerVersion: "1.1.0", minimumManagerVersion: "0.2.0", publishedArtifact: null },
+    { version: "1.0.9" },
+    "0.2.1",
+  ), /drifted/);
+});
+
 test("Manager and Installer versions have independent canonical owners", () => {
   const app = JSON.parse(readFileSync(new URL("../app/package.json", import.meta.url), "utf8"));
   const lock = JSON.parse(readFileSync(new URL("../app/package-lock.json", import.meta.url), "utf8"));
   const cargo = readFileSync(new URL("../app/src-tauri/Cargo.toml", import.meta.url), "utf8");
   const installer = JSON.parse(readFileSync(new URL("../app/installer-versions.json", import.meta.url), "utf8"));
   const tauri = JSON.parse(readFileSync(new URL("../app/src-tauri/tauri.conf.json", import.meta.url), "utf8"));
-  assert.equal(app.version, "0.2.0");
+  assert.match(app.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
   assert.equal(lock.version, app.version);
   assert.equal(lock.packages[""].version, app.version);
   assert.match(cargo, new RegExp(`^version = "${app.version.replaceAll(".", "\\.")}"$`, "m"));
-  assert.deepEqual(installer, { schemaVersion: 2, installerVersion: "1.1.0", minimumManagerVersion: "0.2.0", publishedArtifact: null });
+  assert.equal(installer.schemaVersion, 2);
+  assert.match(installer.installerVersion, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  assert.match(installer.minimumManagerVersion, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  assert.equal(installer.publishedArtifact, null);
   assert.equal(tauri.version, installer.installerVersion);
-  assert.equal(installer.minimumManagerVersion, "0.2.0");
+  assert.ok(installer.minimumManagerVersion.localeCompare(app.version, undefined, { numeric: true }) <= 0);
   assert.deepEqual(Object.keys(tauri.bundle.resources).sort(), [
     "../../LICENSES/Apache-2.0.txt",
     "../../THIRD_PARTY_NOTICES.md",
@@ -44,6 +69,28 @@ test("schema v3 makes the unsigned self-use policy explicit", () => {
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, schemaVersion: 2 }), /identity/);
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, releaseMode: "production" }), /identity/);
   assert.throws(() => verifySelfUseEnvelope({ ...envelope, unexpected: true }), /identity/);
+});
+
+test("candidate archive paths match the Launcher safe extraction contract", () => {
+  assert.equal(normalizedArchiveEntry("node_modules/@openai/codex/package.json"), "node_modules/@openai/codex/package.json");
+  assert.throws(() => normalizedArchiveEntry("./package.json"), /不安全路径/);
+  assert.throws(() => normalizedArchiveEntry("node_modules/../package.json"), /不安全路径/);
+  assert.throws(() => normalizedArchiveEntry("codex/CON.txt"), /Windows 保留路径/);
+});
+
+test("candidate archive builder emits file-relative entries without a dot root", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(path.join(tmpdir(), "tauri-codex-archive-source-"));
+  const archive = path.join(tmpdir(), `tauri-codex-archive-${Date.now()}.zip`);
+  try {
+    mkdirSync(path.join(root, "nested"));
+    writeFileSync(path.join(root, ".prepared-version"), "0.147.0");
+    writeFileSync(path.join(root, "nested", "package.json"), "{}");
+    createArchive(archive, root, [".prepared-version", "nested/package.json"]);
+    assert.deepEqual(archiveEntries(archive), [".prepared-version", "nested/package.json"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(archive, { force: true });
+  }
 });
 
 test("frozen source diagnostics identify every dirty path without file contents", () => {
@@ -98,9 +145,14 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
   assert.match(pipeline, /minimumManagerVersion:\s*minimumManagerVersion/);
   assert.doesNotMatch(pipeline, /minimumManagerVersion:\s*appVersion/);
   assert.match(pipeline, /doctorFinalComponentArchives\(managerArchive, codexArchive\)/);
+  assert.match(pipeline, /--verify-component-archive/);
+  assert.match(pipeline, /const candidateManager = path\.join\(managerRoot, "tauri-codex-manager\.exe"\)[\s\S]*for \(const archive of \[managerArchive, codexArchive\]\)[\s\S]*run\(candidateManager, \["--verify-component-archive", archive\]/);
+  assert.match(pipeline, /assertNodeRuntimeMinimum\(versions\.nodeVersion\)/);
+  assert.match(pipeline, /filesBelow\(codexRoot\)[\s\S]*path\.relative\(codexRoot, filePath\)/);
+  assert.doesNotMatch(pipeline, /createArchive\(codexArchive, codexRoot, \["\."\]\)/);
   assert.equal(pipeline.match(/withRestoredFileBytes\(cargoManifest/g)?.length, 2);
   assert.ok(pipeline.indexOf("doctorFinalComponentArchives(managerArchive, codexArchive);") < pipeline.indexOf("const payload = {"));
-  assert.match(pipeline, /tauri-codex-manager\.exe"\), \["--runtime-check"\]/);
+  assert.match(pipeline, /run\(candidateManager, \["--runtime-check"\]/);
   assert.match(pipeline, /codexEntry, "--version"/);
   assert.match(pipeline, /rgEntry, \["--version"\]/);
   assert.match(pipeline, /managerSource, \["--verify-authenticode", filePath\]/);
@@ -113,12 +165,15 @@ test("split Launcher and Manager are explicit clean build outputs", () => {
 
 test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named Pipe IPC", () => {
   const broker = readFileSync(new URL("../app/src-tauri/src/delivery/broker.rs", import.meta.url), "utf8");
+  const component = readFileSync(new URL("../app/src-tauri/src/delivery/component.rs", import.meta.url), "utf8");
   const health = readFileSync(new URL("../app/src-tauri/src/delivery/health.rs", import.meta.url), "utf8");
   const ipc = readFileSync(new URL("../app/src-tauri/src/delivery/ipc.rs", import.meta.url), "utf8");
   const launcher = readFileSync(new URL("../app/src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(health, /root\.join\("WebView2Loader\.dll"\)/);
   assert.match(health, /verify_authenticode\(&root\.join\("WebView2Loader\.dll"\)\)/);
   assert.match(health, /doctor_codex[\s\S]*verify_codex_executable_provenance\(root\)/);
+  assert.match(broker, /initial_setup[\s\S]*retire_incompatible_state\(&root\)[\s\S]*recover_pending\(&root\)/);
+  assert.match(component, /doctor_system_node\(&node\.version\)[\s\S]*install_node\(&asset\)[\s\S]*doctor_system_node\(&node\.version\)/);
   assert.match(health, /CODEX_PACKAGE_EXECUTABLES[\s\S]*codex-path\/rg\.exe", false/);
   assert.match(broker, /automatic_cycle\(&automatic\)/);
   assert.match(broker, /UpdateIntent::Prepare/);
@@ -137,6 +192,8 @@ test("Launcher owns doctor, hidden Manager launch, automatic staging, and Named 
 test("release workflow commits OSS before creating OSS-only GitHub Release Notes", () => {
   const workflow = readFileSync(new URL("../.github/workflows/windows-release.yml", import.meta.url), "utf8");
   assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /^\s+version:\s*$/m);
+  assert.match(workflow, /\$version = \$appVersion/);
   assert.doesNotMatch(workflow, /\n\s+push:/);
   assert.match(workflow, /- candidate\s+- publish\s+- finalize\s+- rollback/);
   assert.match(workflow, /candidate-build:[\s\S]*if: inputs\.operation == 'candidate'/);
@@ -171,7 +228,8 @@ test("public and human documentation match canonical versions and OSS-only deliv
   const guide = readFileSync(new URL("../人类-文档/开发/构建Windows桌面应用.md", import.meta.url), "utf8");
   const decision = readFileSync(new URL("../文档/项目/项目_tauri-codex/决策/DEC-0001-Windows-x64-Codex桌面封装方案.md", import.meta.url), "utf8");
   assert.match(readme, new RegExp(`当前源码候选版本为 \`v${app.version.replaceAll(".", "\\.")}\``));
-  assert.match(readme, new RegExp(`project-tauri-codex/installers/${installer.installerVersion.replaceAll(".", "\\.")}/windows-x64/tauri-codex_${installer.installerVersion.replaceAll(".", "\\.")}_x64-setup\\.exe`));
+  assert.match(readme, /Setup 尚未正式发布/);
+  assert.doesNotMatch(readme, new RegExp(`project-tauri-codex/installers/${installer.installerVersion.replaceAll(".", "\\.")}/windows-x64/tauri-codex_${installer.installerVersion.replaceAll(".", "\\.")}_x64-setup\\.exe`));
   assert.doesNotMatch(readme, /\[下载[^\]]*Windows[^\]]*\]\(https:\/\/github\.com\/[^)]+\/releases/i);
   assert.doesNotMatch(readme, /暂存 GitHub Releases/);
   assert.match(guide, new RegExp(`\\.codex-build/build/${app.version.replaceAll(".", "\\.")}/windows-x64/tauri-codex\\.exe`));

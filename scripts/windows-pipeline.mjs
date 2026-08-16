@@ -146,23 +146,45 @@ function releaseKey(name) { return `releases/${appVersion}/windows-x64/${name}`;
 function installerKey(name) { return `installers/${installerVersion}/windows-x64/${name}`; }
 function writeJson(filePath, value) { mkdirSync(path.dirname(filePath), { recursive: true }); writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8"); }
 
-function createArchive(output, cwd, entries) {
+export function createArchive(output, cwd, entries) {
   const result = spawnSync("tar.exe", ["-a", "-c", "-f", output, "-C", cwd, ...entries], { stdio: "inherit", windowsHide: true });
   if (result.error || result.status !== 0) fail(`无法创建归档 ${output}`);
 }
 
-function archiveEntries(filePath) {
+export function archiveEntries(filePath) {
   const result = run("tar.exe", ["-tf", filePath], { capture: true });
-  return result.stdout.split(/\r?\n/).map((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, "")).filter(Boolean).sort();
+  return result.stdout.split(/\r?\n/).map((entry) => entry.replaceAll("\\", "/").trim()).filter(Boolean).sort();
+}
+
+export function normalizedArchiveEntry(entry) {
+  const withoutDirectoryMarker = entry.replace(/\/+$/, "");
+  if (!withoutDirectoryMarker || withoutDirectoryMarker.startsWith("/") || /^[A-Za-z]:/.test(withoutDirectoryMarker)) fail(`归档包含不安全路径：${entry}`);
+  const parts = withoutDirectoryMarker.split("/");
+  if (parts.some((part) => !part || part === "." || part === ".." || part.includes(":") || part.endsWith(".") || part.endsWith(" "))) fail(`归档包含不安全路径：${entry}`);
+  for (const part of parts) {
+    const stem = part.split(".", 1)[0].toUpperCase();
+    if (new Set(["CON", "PRN", "AUX", "NUL"]).has(stem) || /^(COM|LPT)[1-9]$/.test(stem)) fail(`归档包含 Windows 保留路径：${entry}`);
+  }
+  return parts.map((part) => part.toLowerCase()).join("/");
+}
+
+function verifyArchiveEntries(filePath) {
+  const seen = new Set();
+  for (const entry of archiveEntries(filePath)) {
+    const normalized = normalizedArchiveEntry(entry);
+    if (!seen.add(normalized)) fail(`归档包含重复路径：${entry}`);
+  }
 }
 
 function verifyManagerArchive(filePath) {
+  verifyArchiveEntries(filePath);
   const actual = archiveEntries(filePath);
   const expected = [...MANAGER_FILES].sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`Manager archive 不完整：${actual.join(", ")}`);
 }
 
 function verifyArchiveTree(filePath, expectedDigest) {
+  verifyArchiveEntries(filePath);
   const root = path.join(buildRoot, `verify-tree-${randomUUID()}`);
   mkdirSync(root, { recursive: true });
   try {
@@ -174,6 +196,9 @@ function verifyArchiveTree(filePath, expectedDigest) {
 }
 
 function doctorFinalComponentArchives(managerArchive, codexArchive) {
+  assertNodeRuntimeMinimum(versions.nodeVersion);
+  verifyArchiveEntries(managerArchive);
+  verifyArchiveEntries(codexArchive);
   const root = path.join(buildRoot, `candidate-doctor-${randomUUID()}`);
   const managerRoot = path.join(root, "manager");
   const codexRoot = path.join(root, "codex");
@@ -183,8 +208,12 @@ function doctorFinalComponentArchives(managerArchive, codexArchive) {
   mkdirSync(doctorHome, { recursive: true });
   try {
     run("tar.exe", ["-xf", managerArchive, "-C", managerRoot]);
+    const candidateManager = path.join(managerRoot, "tauri-codex-manager.exe");
+    for (const archive of [managerArchive, codexArchive]) {
+      run(candidateManager, ["--verify-component-archive", archive], { capture: true });
+    }
     run("tar.exe", ["-xf", codexArchive, "-C", codexRoot]);
-    run(path.join(managerRoot, "tauri-codex-manager.exe"), ["--runtime-check"], {
+    run(candidateManager, ["--runtime-check"], {
       env: { ...process.env, TAURI_CODEX_SYSTEM_NODE: process.execPath },
       capture: true,
     });
@@ -207,6 +236,17 @@ function doctorFinalComponentArchives(managerArchive, codexArchive) {
     if (!rgOutput.startsWith("ripgrep ")) fail(`最终 Codex component rg doctor 失败：${rgOutput || "无输出"}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function assertNodeRuntimeMinimum(required) {
+  const parse = (value) => value.replace(/^v/, "").split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
+  const actual = parse(process.versions.node);
+  const expected = parse(required);
+  if (actual.some((part) => !Number.isInteger(part)) || expected.some((part) => !Number.isInteger(part))) fail(`Node.js 版本无效：${process.versions.node} / ${required}`);
+  for (let index = 0; index < 3; index += 1) {
+    if (actual[index] > expected[index]) return;
+    if (actual[index] < expected[index]) fail(`构建机 Node.js ${process.versions.node} 低于候选清单要求 ${required}，不能冻结候选。`);
   }
 }
 
@@ -241,14 +281,15 @@ function prepareComponents() {
   const codexArchive = path.join(componentRoot, `tauri-codex-codex-${versions.codexVersion}-windows-x64.zip`);
   const nodeAsset = path.join(componentRoot, path.basename(nodeMsi));
   createArchive(managerArchive, targetRoot, MANAGER_FILES);
-  createArchive(codexArchive, codexRoot, ["."]);
+  const codexEntries = filesBelow(codexRoot).map((filePath) => path.relative(codexRoot, filePath).replaceAll(path.sep, "/")).sort();
+  createArchive(codexArchive, codexRoot, codexEntries);
   copyFileSync(nodeMsi, nodeAsset);
   verifyManagerArchive(managerArchive);
   const managerTreeSha256 = installedTreeSha256(targetRoot, MANAGER_FILES.map((name) => path.join(targetRoot, name)));
   const codexTreeSha256 = installedTreeSha256(codexRoot);
+  doctorFinalComponentArchives(managerArchive, codexArchive);
   verifyArchiveTree(managerArchive, managerTreeSha256);
   verifyArchiveTree(codexArchive, codexTreeSha256);
-  doctorFinalComponentArchives(managerArchive, codexArchive);
   const payload = {
     product: "tauri-codex", version: appVersion, platform: "windows", architecture: "x86_64",
     minimumLauncherVersion: installerVersion, minimumManagerVersion: minimumManagerVersion,
@@ -362,6 +403,7 @@ function verifyReleaseCandidate() {
   }
   const manager = candidate.immutable.find((item) => item.role === "manager"); verifyManagerArchive(path.join(releaseRoot, manager.localPath));
   const codex = candidate.immutable.find((item) => item.role === "codex");
+  doctorFinalComponentArchives(path.join(releaseRoot, manager.localPath), path.join(releaseRoot, codex.localPath));
   verifyArchiveTree(path.join(releaseRoot, manager.localPath), manifestPayload.components.find((component) => component.id === "manager").installedTreeSha256);
   verifyArchiveTree(path.join(releaseRoot, codex.localPath), manifestPayload.components.find((component) => component.id === "codex").installedTreeSha256);
   for (const entry of [path.join(appRoot, "dist", "index.html"), path.join(appRoot, "dist", "launcher.html")]) if (!existsSync(entry)) fail(`Vite 构建入口缺失：${entry}`);

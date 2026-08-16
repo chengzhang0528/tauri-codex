@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "tauri-codex",
   "mainBinaryName": "tauri-codex",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "identifier": "com.tauri.codex",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -19,7 +19,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "copyright": "Copyright (C) 2026 chengzhang0528 and tauri-codex contributors",
     "license": "GPL-3.0-or-later",
     "licenseFile": "../../LICENSE",

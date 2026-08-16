@@ -153,12 +153,12 @@ Treat a split Launcher/Manager application as a multi-entry build, not just a so
 
 - Declare every frontend HTML entry explicitly and verify each built page exists; a dynamically created Launcher window pointing at an omitted entry will render blank after packaging.
 - Build every native executable explicitly. Framework bundlers often compile only the configured main binary, so prove the Manager/helper executable exists before creating its archive.
+- Create component archives from explicit normalized file-relative entries, never a dot/root input whose stored path semantics depend on the archive tool. Before freezing artifact identity, invoke the candidate client's own production parser/safe-unpack path against each final archive; a successful generic `tar`/`zip` extraction is insufficient evidence.
 - Generate the install-time bootstrap seed before bundling the Installer. After the Installer is built, measure it and generate the public bootstrap with the final Installer reference; never let a placeholder bootstrap enter the package unnoticed.
 - Inspect the platform installer's generated shortcut behavior. If desktop shortcut creation is optional by default, add the platform-supported post-install hook and verify the target is the stable Launcher.
 - Run at least one build after deleting local build/release output while retaining only dependency caches. An incremental build cannot prove that every binary and embedded resource is produced by the declared graph.
 
 Keep Installer and client versions independent in their canonical owners. A normal client version bump must not rewrite the Installer version. When reusing an Installer from an older release/tag, read its public size and digest from the distribution source rather than rebuilding it or trusting a stale local copy.
-
 Keep the current Installer version and verified candidate identity in one project-local metadata owner. Initialize it on first build, default unspecified later changes to a patch bump, and reuse an already verified same-version candidate after interruption.
 
 ## 10. Black-Box Acceptance
@@ -168,7 +168,7 @@ Use an exact public asset, not a worktree binary:
 2. Install on a clean supported machine or isolated profile; confirm launcher starts and creates the expected shortcut/registration.
 3. Confirm the launcher can bootstrap a release using the deployment-configured public endpoint.
 4. Exercise the Installer evolution path. For an explicit in-place compatibility promise, repeat the same Installer and then run a higher Installer without losing registration or user data. Otherwise prove the running client stops at `setup-required`, normal external Setup succeeds, fallback uninstall/reinstall remains available, the complete required state is restored, and no incompatible partial mutation occurs.
-5. Test both eligible and missing system-component cases; assert reuse versus download.
+5. Test eligible, missing, and below-minimum system-component cases; assert reuse versus manifest-frozen official installation, elevation/reboot handling, and post-install re-probe.
 6. Corrupt a staged asset or doctor result; assert `current` remains runnable and no bad release becomes ready.
 7. Stage an update while work is active; assert waiting-for-drain and no forced interruption.
 8. Confirm activation, post-start health, and the configured recovery mode. For automatic rollback, deliberately fail health and prove restoration; for forward repair, prove no incompatible prior release is selected and the repair state remains diagnosable.

@@ -12,10 +12,6 @@ on:
           - publish
           - finalize
           - rollback
-      version:
-        description: "必须与 app/package.json 一致的 Manager 版本"
-        required: true
-        default: "0.2.0"
       source_commit:
         description: "候选绑定的完整 40 位 source commit"
         required: true
@@ -54,13 +50,9 @@ jobs:
         shell: pwsh
         run: |
           $operation = "${{ inputs.operation }}"
-          $version = "${{ inputs.version }}"
           $sourceCommit = "${{ inputs.source_commit }}"
           $candidateRunId = "${{ inputs.candidate_run_id }}"
           $publishRunId = "${{ inputs.publish_run_id }}"
-          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
-            throw "Invalid release version: $version"
-          }
           if ($sourceCommit -notmatch '^[a-f0-9]{40}$' -or (git rev-parse HEAD) -ne $sourceCommit) {
             throw "source_commit must resolve to the checked-out 40-character commit"
           }
@@ -72,9 +64,10 @@ jobs:
           }
           $appVersion = (Get-Content -Raw app/package.json | ConvertFrom-Json).version
           $installerVersion = (Get-Content -Raw app/installer-versions.json | ConvertFrom-Json).installerVersion
-          if ($version -ne $appVersion) {
-            throw "Release version $version does not match app/package.json $appVersion"
+          if ($appVersion -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Invalid app/package.json version: $appVersion"
           }
+          $version = $appVersion
           if (git tag --list "v$version") {
             throw "Tag v$version already exists; this workflow never mutates an existing release"
           }

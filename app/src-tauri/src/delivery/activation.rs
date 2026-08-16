@@ -70,6 +70,58 @@ pub fn current_component_versions(root: &Path) -> Result<(Option<String>, Option
     Ok((codex, node))
 }
 
+pub fn retire_incompatible_state(root: &Path) -> Result<Option<PathBuf>, String> {
+    let releases = root.join("releases");
+    let current = releases.join("current.json");
+    if !current.is_file() {
+        return Ok(None);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&current).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("current 状态损坏：{error}"))?;
+    let schema = value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "current 状态缺少 schemaVersion".to_string())?;
+    if schema == u64::from(RELEASE_STATE_SCHEMA) {
+        return Ok(None);
+    }
+    if schema != 1 {
+        return Err(format!("current 状态 schema 不受支持：{schema}"));
+    }
+
+    let retired = root.join("retired-staging");
+    fs::create_dir_all(&retired).map_err(|error| error.to_string())?;
+    let target = retired.join(format!("legacy-releases-{}", uuid::Uuid::new_v4().simple()));
+    move_directory(&releases, &target)
+        .map_err(|error| format!("无法隔离不兼容 delivery 状态：{error}"))?;
+    let journal = journal_path(root);
+    if journal.is_file() {
+        if let Err(error) = move_directory(&journal, &target.join("activation-journal.json")) {
+            let rollback = move_directory(&target, &releases);
+            return Err(match rollback {
+                Ok(()) => format!("无法隔离旧 activation journal，已恢复旧 release 状态：{error}"),
+                Err(rollback) => format!(
+                    "无法隔离旧 activation journal：{error}；恢复旧 release 状态失败：{rollback}"
+                ),
+            });
+        }
+    }
+    if let Err(error) = fs::create_dir_all(&releases) {
+        let retired_journal = target.join("activation-journal.json");
+        let journal_rollback = if retired_journal.is_file() {
+            move_directory(&retired_journal, &journal)
+        } else {
+            Ok(())
+        };
+        let release_rollback = move_directory(&target, &releases);
+        return Err(format!(
+            "无法创建新 release 目录：{error}；journal 恢复：{journal_rollback:?}；release 恢复：{release_rollback:?}"
+        ));
+    }
+    Ok(Some(target))
+}
+
 pub fn commit_staged(root: &Path, target: &UpdateTarget) -> Result<(), String> {
     let version = match target {
         UpdateTarget::Release { version } => version,
@@ -255,8 +307,8 @@ fn recover_after_failure(root: &Path, error: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_staged, move_directory, recover_pending, release_path, staging_path, write_journal,
-        ActivationJournal, ACTIVATION_JOURNAL_SCHEMA,
+        commit_staged, move_directory, recover_pending, release_path, retire_incompatible_state,
+        staging_path, write_journal, ActivationJournal, ACTIVATION_JOURNAL_SCHEMA,
     };
     use crate::delivery::contract::UpdateTarget;
     use serde_json::json;
@@ -328,6 +380,64 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .starts_with("repair-0.2.1-")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn incompatible_delivery_state_is_retired_without_touching_user_configuration() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-legacy-delivery-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(root.join("releases/0.1.11")).unwrap();
+        fs::write(
+            root.join("releases/current.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 1,
+                "current": "0.1.11"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(root.join("servers.json"), b"[]").unwrap();
+        fs::write(root.join("activation-journal.json"), b"legacy").unwrap();
+
+        let retired = retire_incompatible_state(&root).unwrap().unwrap();
+
+        assert!(retired.join("current.json").is_file());
+        assert!(retired.join("0.1.11").is_dir());
+        assert_eq!(
+            fs::read(retired.join("activation-journal.json")).unwrap(),
+            b"legacy"
+        );
+        assert!(root.join("releases").is_dir());
+        assert!(!root.join("releases/current.json").exists());
+        assert!(!root.join("activation-journal.json").exists());
+        assert_eq!(fs::read(root.join("servers.json")).unwrap(), b"[]");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_delivery_state_is_not_retired() {
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-unknown-delivery-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(root.join("releases/9.0.0")).unwrap();
+        fs::write(
+            root.join("releases/current.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 99,
+                "current": "9.0.0"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(retire_incompatible_state(&root).is_err());
+        assert!(root.join("releases/current.json").is_file());
+        assert!(root.join("releases/9.0.0").is_dir());
+        assert!(!root.join("retired-staging").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

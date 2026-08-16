@@ -45,6 +45,10 @@ pub fn verify_release_codex_component(root: &std::path::Path) -> Result<(), Stri
     health::verify_codex_executable_provenance(root)
 }
 
+pub fn verify_release_component_archive(path: &std::path::Path) -> Result<(), String> {
+    component::verify_component_archive(path)
+}
+
 pub fn current_release_path(root: &std::path::Path) -> Result<Option<std::path::PathBuf>, String> {
     activation::current_release_path(root)
 }

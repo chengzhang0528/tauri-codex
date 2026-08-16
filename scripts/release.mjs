@@ -24,6 +24,36 @@ export function replaceVersion(text, current, next, file) {
   return text.replace(marker, `"${next}"`);
 }
 
+export function replaceExact(text, marker, replacement, file, expected = 1) {
+  const matches = text.split(marker).length - 1;
+  if (matches !== expected) throw new Error(`${file} must contain exactly ${expected} expected marker(s)`);
+  return text.replaceAll(marker, replacement);
+}
+
+export function prepareInstallerVersionValues(installer, tauri, appVersion) {
+  if (installer?.schemaVersion !== 2 || !stableVersion.test(installer.installerVersion) || !stableVersion.test(installer.minimumManagerVersion)) {
+    throw new Error("app/installer-versions.json is invalid");
+  }
+  if (!stableVersion.test(appVersion)) throw new Error("app/package.json has an invalid version");
+  if (tauri?.version !== installer.installerVersion) throw new Error("Tauri and Installer versions have drifted");
+  const current = installer.installerVersion;
+  const next = nextPatchVersion(current);
+  return {
+    current,
+    next,
+    installer: { ...installer, installerVersion: next, minimumManagerVersion: appVersion, publishedArtifact: null },
+    tauri: { ...tauri, version: next },
+  };
+}
+
+export function replaceCargoPackageVersion(text, current, next) {
+  if (!stableVersion.test(current) || !stableVersion.test(next)) throw new Error("invalid Cargo package version");
+  const escaped = current.replaceAll(".", "\\.");
+  const marker = new RegExp(`(name = "tauri-codex"\\r?\\nversion = ")${escaped}(")`, "g");
+  if ([...text.matchAll(marker)].length !== 1) throw new Error("app/src-tauri/Cargo.lock has an unexpected tauri-codex version count");
+  return text.replace(marker, `$1${next}$2`);
+}
+
 function runGit(args, options = {}) {
   const result = spawnSync("git", ["-C", workspaceRoot, ...args], {
     encoding: "utf8",
@@ -50,13 +80,21 @@ function updateVersions(current, next) {
       if (text.split(marker).length - 1 !== 1) throw new Error("app/src-tauri/Cargo.toml has an unexpected version count");
       return text.replace(marker, `version = "${next}"`);
     }],
+    [path.join(appRoot, "src-tauri", "Cargo.lock"), (text) => replaceCargoPackageVersion(text, current, next)],
+    [path.join(workspaceRoot, "README.md"), (text) => replaceExact(text, `\`v${current}\``, `\`v${next}\``, "README.md")],
+    [path.join(workspaceRoot, "人类-文档", "开发", "构建Windows桌面应用.md"), (text) => {
+      let updated = replaceExact(text, `.codex-build/build/${current}/`, `.codex-build/build/${next}/`, "构建Windows桌面应用.md build path");
+      updated = replaceExact(updated, `.codex-build/releases/${current}/`, `.codex-build/releases/${next}/`, "构建Windows桌面应用.md release path");
+      return updated;
+    }],
   ];
-  for (const [file, transform] of files) writeFileSync(file, transform(readFileSync(file, "utf8")), "utf8");
+  const updates = files.map(([file, transform]) => [file, transform(readFileSync(file, "utf8"))]);
+  for (const [file, text] of updates) writeFileSync(file, text, "utf8");
 }
 
 function preparePatch() {
   if (runGit(["branch", "--show-current"], { capture: true }) !== "main") throw new Error("release preparation must start from main");
-  if (runGit(["status", "--porcelain", "--", "app/package.json", "app/package-lock.json", "app/src-tauri/Cargo.toml", "app/src-tauri/tauri.conf.json"], { capture: true })) {
+  if (runGit(["status", "--porcelain", "--", "app/package.json", "app/package-lock.json", "app/src-tauri/Cargo.toml", "app/src-tauri/Cargo.lock", "app/src-tauri/tauri.conf.json", "README.md", "人类-文档/开发/构建Windows桌面应用.md"], { capture: true })) {
     throw new Error("canonical version files must be clean before release preparation");
   }
   const packagePath = path.join(appRoot, "package.json");
@@ -66,10 +104,27 @@ function preparePatch() {
   console.log(JSON.stringify({ prepared: true, current, version: next, tag: `v${next}` }, null, 2));
 }
 
+function prepareInstallerPatch() {
+  if (runGit(["branch", "--show-current"], { capture: true }) !== "main") throw new Error("release preparation must start from main");
+  if (runGit(["status", "--porcelain", "--", "app/installer-versions.json", "app/src-tauri/tauri.conf.json"], { capture: true })) {
+    throw new Error("canonical Installer version files must be clean before release preparation");
+  }
+  const appVersion = JSON.parse(readFileSync(path.join(appRoot, "package.json"), "utf8")).version;
+  const installerPath = path.join(appRoot, "installer-versions.json");
+  const tauriPath = path.join(appRoot, "src-tauri", "tauri.conf.json");
+  const installer = JSON.parse(readFileSync(installerPath, "utf8"));
+  const tauri = JSON.parse(readFileSync(tauriPath, "utf8"));
+  const { current, next, installer: updatedInstaller, tauri: updatedTauri } = prepareInstallerVersionValues(installer, tauri, appVersion);
+  writeFileSync(installerPath, `${JSON.stringify(updatedInstaller, null, 2)}\n`, "utf8");
+  writeFileSync(tauriPath, `${JSON.stringify(updatedTauri, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify({ prepared: true, current, installerVersion: next, minimumManagerVersion: appVersion }, null, 2));
+}
+
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   try {
-    if (process.argv[2] !== "patch") throw new Error("usage: npm run release:patch");
-    preparePatch();
+    if (process.argv[2] === "patch") preparePatch();
+    else if (process.argv[2] === "installer-patch") prepareInstallerPatch();
+    else throw new Error("usage: node scripts/release.mjs <patch|installer-patch>");
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

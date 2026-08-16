@@ -122,6 +122,17 @@ pub fn verify_installed_release(root: &Path, manifest: &Manifest) -> Result<(), 
     verify_release(manifest, &release, "installed")
 }
 
+pub fn verify_component_archive(archive_path: &Path) -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!(
+        "tauri-codex-archive-check-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let result = unpack_zip(archive_path, &root, &|| false);
+    let _ = fs::remove_dir_all(&root);
+    result.map(|_| ())
+}
+
 fn verify_release(manifest: &Manifest, release: &Path, state: &str) -> Result<(), String> {
     let stored: Manifest = serde_json::from_slice(
         &fs::read(release.join("release.json")).map_err(|error| error.to_string())?,
@@ -499,5 +510,37 @@ mod tests {
         );
         assert!(classify_node_installer_exit(Some(1603)).is_err());
         assert!(classify_node_installer_exit(None).is_err());
+    }
+
+    #[test]
+    fn component_archive_check_uses_the_production_unpack_rules() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let root = std::env::temp_dir().join(format!(
+            "tauri-codex-archive-fixture-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("unsafe.zip");
+        let file = fs::File::create(&archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("./package.json", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer.finish().unwrap();
+        assert!(super::verify_component_archive(&archive).is_err());
+
+        let valid_archive = root.join("valid.zip");
+        let file = fs::File::create(&valid_archive).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("package.json", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer.finish().unwrap();
+        super::verify_component_archive(&valid_archive).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 }

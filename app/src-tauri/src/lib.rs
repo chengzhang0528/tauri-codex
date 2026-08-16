@@ -45,13 +45,16 @@ where
 enum ManagerVerificationAction {
     Authenticode(std::path::PathBuf),
     CodexComponent(std::path::PathBuf),
+    ComponentArchive(std::path::PathBuf),
 }
 
 fn manager_verification_action(
     args: &[std::ffi::OsString],
 ) -> Result<Option<ManagerVerificationAction>, String> {
-    let Some(flag @ ("--verify-authenticode" | "--verify-codex-component")) =
-        args.first().and_then(|arg| arg.to_str())
+    let Some(
+        flag
+        @ ("--verify-authenticode" | "--verify-codex-component" | "--verify-component-archive"),
+    ) = args.first().and_then(|arg| arg.to_str())
     else {
         return Ok(None);
     };
@@ -65,6 +68,7 @@ fn manager_verification_action(
     Ok(Some(match flag {
         "--verify-authenticode" => ManagerVerificationAction::Authenticode(path),
         "--verify-codex-component" => ManagerVerificationAction::CodexComponent(path),
+        "--verify-component-archive" => ManagerVerificationAction::ComponentArchive(path),
         _ => unreachable!(),
     }))
 }
@@ -80,6 +84,9 @@ pub fn run_manager() {
                 }
                 ManagerVerificationAction::CodexComponent(root) => {
                     delivery::verify_release_codex_component(&root)
+                }
+                ManagerVerificationAction::ComponentArchive(path) => {
+                    delivery::verify_release_component_archive(&path)
                 }
             };
             if let Err(error) = result {
@@ -279,7 +286,16 @@ mod argument_tests {
                 OsString::from("--verify-codex-component"),
                 path.clone().into_os_string(),
             ]),
-            Ok(Some(ManagerVerificationAction::CodexComponent(path)))
+            Ok(Some(ManagerVerificationAction::CodexComponent(
+                path.clone()
+            )))
+        );
+        assert_eq!(
+            manager_verification_action(&[
+                OsString::from("--verify-component-archive"),
+                path.clone().into_os_string(),
+            ]),
+            Ok(Some(ManagerVerificationAction::ComponentArchive(path)))
         );
         assert!(
             manager_verification_action(&[OsString::from("--verify-authenticode")])

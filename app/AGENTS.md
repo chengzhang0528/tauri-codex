@@ -34,5 +34,5 @@ Depends On:
 - Windows 10 22H2 x64 与 Windows 11 x64 共用路径；不得引入仅 Windows 11 的系统 API。
 - GitHub 不得存放运行时二进制；Manager 不得下载、解包、安装、激活或独立更新 Codex。所有 release 组件只由 Launcher 从固定 OSS 根按显式 self-use manifest 管理。
 - self-use 只允许 tauri-codex 自有 Launcher、Manager 和 Installer 无 Authenticode。Codex 必须固定上游包版本和精确 Windows 可执行闭包，以安装树 SHA-256 覆盖完整组件，并对包内具备签名的 OpenAI 可执行文件校验 Authenticode；固定闭包中的上游 `codex-path/rg.exe` 不得被误判为已签名。Node 与 WebView2Loader 仍必须通过上游 Authenticode 校验。
-- schema v1/v2、GitHub binary fallback、独立 Codex `current` 和 `installer@version` 不兼容也不迁移；旧安装必须重新运行新版 Installer。
+- schema v1/v2、GitHub binary fallback、独立 Codex `current` 和 `installer@version` 不兼容也不迁移；旧安装运行新版 Installer 后，由新 Launcher 隔离应用自有的旧 release 状态并重新 bootstrap，用户配置、应用专属 `CODEX_HOME` 和会话数据不得删除。
 - 不写入示例密钥、Token、密码或生成日志。
