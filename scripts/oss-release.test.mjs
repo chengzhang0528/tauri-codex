@@ -16,6 +16,7 @@ import {
   safeObjectKey,
   snapshotRelease,
   stageRelease,
+  OSS_BOOTSTRAP_LOCK_KEY,
 } from "./oss-release.mjs";
 
 const baseURL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
@@ -121,19 +122,21 @@ function fakeFetch(options = {}) {
     if (key && method === "PUT") {
       events.push(`put:${key}`);
       if (options.failPut === key) return new Response("injected", { status: 500 });
-      if (options.beforeConditionalPut === key) {
+      if (options.beforePut === key) {
         objects.set(key, options.raceBytes);
-        options.beforeConditionalPut = null;
+        options.beforePut = null;
       }
       if (init.headers["x-oss-forbid-overwrite"] === "true" && objects.has(key)) return new Response("exists", { status: 409 });
-      if (init.headers["If-Match"] && (!objects.has(key) || init.headers["If-Match"] !== `"${digest(objects.get(key))}"`)) return new Response("changed", { status: 412 });
-      if (init.headers["If-None-Match"] === "*" && objects.has(key)) return new Response("exists", { status: 412 });
+      if (init.headers["If-Match"] || init.headers["If-None-Match"]) return new Response("unsupported", { status: 400 });
       objects.set(key, Buffer.from(init.body));
+      if (options.afterPutTarget && options.afterPutTarget === key) {
+        objects.set(options.afterPutMutationKey, options.afterPutMutationBytes);
+        options.afterPutTarget = null;
+      }
       return new Response("", { status: 200 });
     }
     if (key && method === "DELETE") {
       events.push(`delete:${key}`);
-      if (init.headers["If-Match"] && (!objects.has(key) || init.headers["If-Match"] !== `"${digest(objects.get(key))}"`)) return new Response("changed", { status: 412 });
       objects.delete(key);
       return new Response(null, { status: 204 });
     }
@@ -381,16 +384,34 @@ test("commit rejects different Bootstrap bytes for the same release version", as
   }
 });
 
-test("conditional Bootstrap commit rejects a concurrent writer", async () => {
+test("Bootstrap commit uses an OSS lock and rejects a concurrent lock holder", async () => {
+  const current = fixture("0.1.9", "1.0.9");
+  const next = fixture("0.2.0", "1.1.0");
+  const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
+  for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
+  objects.push([OSS_BOOTSTRAP_LOCK_KEY, Buffer.from("another publisher" )]);
+  const remote = fakeFetch({ objects });
+  try {
+    await assert.rejects(() => snapshotAndCommit(next, remote), /lock is already held/);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), current.bootstrapBytes);
+    assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_LOCK_KEY), Buffer.from("another publisher"));
+  } finally {
+    rmSync(current.root, { recursive: true, force: true });
+    rmSync(next.root, { recursive: true, force: true });
+  }
+});
+
+test("Bootstrap commit rechecks the snapshot after acquiring the OSS lock", async () => {
   const current = fixture("0.1.9", "1.0.9");
   const next = fixture("0.2.0", "1.1.0");
   const racing = fixture("0.3.0", "1.2.0");
   const objects = [[OSS_BOOTSTRAP_KEY, current.bootstrapBytes]];
   for (const item of next.candidatePayload.immutable) objects.push([item.artifact.objectKey, item.localPath ? readFileSync(path.join(next.root, item.localPath)) : next.blobs.installer]);
-  const remote = fakeFetch({ objects, beforeConditionalPut: OSS_BOOTSTRAP_KEY, raceBytes: racing.bootstrapBytes });
+  const remote = fakeFetch({ objects, afterPutTarget: OSS_BOOTSTRAP_LOCK_KEY, afterPutMutationKey: OSS_BOOTSTRAP_KEY, afterPutMutationBytes: racing.bootstrapBytes });
   try {
-    await assert.rejects(() => snapshotAndCommit(next, remote), /HTTP 412/);
+    await assert.rejects(() => snapshotAndCommit(next, remote), /已在 snapshot 后变化/);
     assert.deepEqual(remote.objects.get(OSS_BOOTSTRAP_KEY), racing.bootstrapBytes);
+    assert.equal(remote.objects.has(OSS_BOOTSTRAP_LOCK_KEY), false);
   } finally {
     rmSync(current.root, { recursive: true, force: true });
     rmSync(next.root, { recursive: true, force: true });

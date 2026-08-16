@@ -37,9 +37,9 @@ Depends On:
 | `publish:release:oss -- preflight <version>` | 用项目探针验证 OSS 凭据写入与匿名回读，不输出 Secret | 短暂创建并精确删除 probe object |
 | `publish:release:oss -- stage <version>` | 上传或复用全部不可变对象，并逐个匿名回读验证；不移动 Bootstrap | 改变 OSS 不可变对象 |
 | `publish:release:oss -- snapshot <version>` | 保存当前 Bootstrap 原始 bytes、SHA-256 与 ETag，并绑定目标候选 | 写入候选目录内的忽略文件 |
-| `publish:release:oss -- commit <version>` | 重新验证完整 closure 与快照后，条件提交唯一 mutable Bootstrap | 改变 OSS Bootstrap |
+| `publish:release:oss -- commit <version>` | 重新验证完整 closure 后取得固定 lock object，锁内重读并校验快照，再普通写入唯一 mutable Bootstrap 并匿名回读 | 改变 OSS Bootstrap 与短时 lock object |
 | `publish:release:oss -- confirm <version>` | 匿名回读不可变 closure 与 Bootstrap，确认与候选逐字节一致 | 只读 |
-| `publish:release:oss -- rollback <version>` | 仅当当前 Bootstrap 仍等于候选时，条件恢复快照并回读 | 改变 OSS Bootstrap |
+| `publish:release:oss -- rollback <version>` | 取得同一固定 lock object，锁内确认当前仍等于本候选后普通恢复/删除快照并回读 | 改变 OSS Bootstrap 与短时 lock object |
 | `release:patch` | 计算下一 Manager patch；Installer 版本保持独立 | 修改版本源，仍不发布 |
 | `test:rust` / `test` | 运行 Development 白盒门禁 | 只写入忽略的构建缓存 |
 
@@ -57,9 +57,9 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 4. `installer:verify` 只消费 `candidate.json`，不重新生成候选。
 5. `stage` 对每个 immutable object 使用禁止覆盖上传；已存在对象只能在匿名回读后证明同 bytes 才复用。
 6. `snapshot` 保存提交前 Bootstrap 的精确 bytes、SHA-256 与 ETag；首次 v3 发布允许从经结构校验的 schema v1 Bootstrap 条件迁移。失败的 v2 候选从未公开，v2 不作为线上迁移输入。
-7. 完整匿名回读 closure 后，`commit` 只在当前 Bootstrap 仍等于快照时写 `bootstrap/windows-x64.json`，并再次匿名读取同 bytes。
+7. 完整匿名回读 closure 后，`commit` 用 `x-oss-forbid-overwrite: true` 排他创建 `bootstrap/windows-x64.commit.lock`；锁内重新读取 Bootstrap 并与 snapshot 的原始 bytes/ETag 比较，仍一致时使用普通 PUT 写入 `bootstrap/windows-x64.json`，再次匿名读取同 bytes，最后删除 lock。OSS `PutObject` 不使用标准 `If-Match`/`If-None-Match`。
 8. 独立公开安装验收通过后，`finalize` 才创建 tag 和 Release Notes；正文只含 OSS Installer/manifest 链接，不上传文件。
-9. 提交后验收失败且 tag 尚未创建时，`rollback` 只在当前 Bootstrap 仍等于本候选时恢复快照；不可变对象保留为未引用对象，不覆盖或删除。
+9. 提交后验收失败且 tag 尚未创建时，`rollback` 取得同一 lock，锁内确认当前 Bootstrap 仍等于本候选后普通 PUT/DELETE 恢复快照并回读；不可变对象保留为未引用对象，不覆盖或删除。
 
 任一步失败都不得改写冻结候选或移动 Bootstrap；重试复用同一 `candidate.json`。同版本 bytes 不一致必须换版本，不能覆盖。
 
@@ -75,7 +75,7 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 
 ## GitHub Workflow
 
-`windows-release.yml` 只接受受保护的 `workflow_dispatch`，并把同一冻结候选分成四种可恢复操作：`candidate` 只构建并保留 14 天 artifact；`publish` 通过 candidate run ID 下载该候选，执行 preflight、stage、snapshot 和 commit；`finalize` 在独立公开安装验收通过后再次确认 OSS identity，再创建 GitHub tag/Release Notes；`rollback` 通过 candidate run ID 与 publish run ID 条件恢复提交前快照。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
+`windows-release.yml` 只接受受保护的 `workflow_dispatch`，并把同一冻结候选分成四种可恢复操作：`candidate` 只构建并保留 14 天 artifact；`publish` 通过 candidate run ID 下载该候选，执行 preflight、stage、snapshot 和 commit；发布/回滚 job 从当前 workflow commit 读取修复后的发布器，同时通过 `TAURI_CANDIDATE_SOURCE_COMMIT` 继续校验候选冻结 source commit；`finalize` 在独立公开安装验收通过后再次确认 OSS identity，再创建 GitHub tag/Release Notes；`rollback` 通过 candidate run ID 与 publish run ID 恢复提交前快照。GitHub Release job 不上传 binary assets，正文只含固定 OSS 链接。
 
 本 Runbook 不构成 Deployment 授权。向 OSS 写对象、移动 Bootstrap 或公开 Release Notes 必须由单独授权的 Deployment 执行。
 
@@ -83,7 +83,7 @@ self-use `candidate` 构建不读取 Authenticode PFX、Ed25519 key ID/private/p
 
 - Codex 固定 executable 闭包不匹配、要求签名的 OpenAI 文件未通过 Authenticode，或 Node/WebView2Loader 未通过上游 Authenticode：停止候选构建；不得补签、任意跳过或降级为 self-use unsigned。
 - OSS preflight、上传或匿名回读失败：保留不可变对象供同候选重试，不提交 Bootstrap。
-- Bootstrap 提交后的公开安装验收失败：在 tag 创建前运行 `rollback`；若 Bootstrap 已被其他写入者改变，停止并人工判定，不做盲覆盖。
+- Bootstrap 提交后的公开安装验收失败：在 tag 创建前运行 `rollback`；若 lock 已被占用或锁内 Bootstrap 已被其他写入者改变，停止并人工判定，不做盲覆盖。发布器异常退出可能留下 lock object，必须先由受控运维确认无活动发布后精确删除，再重试。
 - candidate metadata 与本地 bytes 不一致：停止并废弃该版本，不重建覆盖。
 - schema、release mode、platform、architecture、compatibility、角色限定 provenance、size、digest 或 object key 不一致：拒绝候选。
 - 不得改用 GitHub、npm registry 或其他 binary origin 绕过 OSS 故障。

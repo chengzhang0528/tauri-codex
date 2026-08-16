@@ -156,7 +156,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source-commit }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -179,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source-commit }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -198,6 +198,7 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CANDIDATE_SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
         run: npm run publish:release:oss -- stage ${{ needs.resolve.outputs.version }}
 
       - name: Snapshot the exact previous Bootstrap
@@ -205,6 +206,7 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CANDIDATE_SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
         run: npm run publish:release:oss -- snapshot ${{ needs.resolve.outputs.version }}
 
       - name: Upload rollback snapshot
@@ -225,7 +227,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source-commit }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -249,6 +251,7 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CANDIDATE_SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
         run: |
           npm run publish:release:oss -- commit ${{ needs.resolve.outputs.version }}
           npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
@@ -266,7 +269,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source-commit }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -285,6 +288,7 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CANDIDATE_SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
         run: npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
 
       - name: Create OSS-only GitHub Release Notes
@@ -309,7 +313,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.source-commit }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -336,4 +340,5 @@ jobs:
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
           ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          TAURI_CANDIDATE_SOURCE_COMMIT: ${{ needs.resolve.outputs.source-commit }}
         run: npm run publish:release:oss -- rollback ${{ needs.resolve.outputs.version }}

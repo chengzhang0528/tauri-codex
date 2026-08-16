@@ -148,6 +148,8 @@ test("release workflow commits OSS before creating OSS-only GitHub Release Notes
   assert.match(workflow, /publish:release:oss -- snapshot/);
   assert.match(workflow, /publish:release:oss -- confirm/);
   assert.match(workflow, /publish:release:oss -- rollback/);
+  assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /TAURI_CANDIDATE_SOURCE_COMMIT: \$\{\{ needs\.resolve\.outputs\.source-commit \}\}/);
   for (const secret of [
     "TAURI_CODEX_AUTHENTICODE_PFX_BASE64",
     "TAURI_CODEX_AUTHENTICODE_PFX_PASSWORD",
@@ -192,6 +194,9 @@ test("runtime and tooling contain no legacy delivery owner or fallback", () => {
   assert.equal(seed.payload.release.manifest.provenance, "self-use+sha256");
   assert.doesNotMatch(delivery, /github\.com|npm install|installer@version|"previous"/i);
   assert.doesNotMatch(publisher, /github\.com|retireRelease/);
+  assert.match(publisher, /x-oss-forbid-overwrite/);
+  assert.match(publisher, /Bootstrap mutation lock/);
+  assert.doesNotMatch(publisher, /If-Match|If-None-Match/);
   assert.equal(existsSync(new URL("../app/src-tauri/src/thin.rs", import.meta.url)), false);
   assert.equal(existsSync(new URL("../app/src-tauri/src/updates.rs", import.meta.url)), false);
   assert.equal(existsSync(new URL("../.github/workflows/retire-windows-release.yml", import.meta.url)), false);

@@ -9,6 +9,7 @@ import { CODEX_PROVENANCE, METADATA_PROVENANCE, SELF_USE_PROVENANCE, UPSTREAM_AU
 export const OSS_BASE_URL = "https://shared-public-assets.oss-cn-beijing.aliyuncs.com/project-tauri-codex";
 export const OSS_BUCKET = "shared-public-assets";
 export const OSS_BOOTSTRAP_KEY = "bootstrap/windows-x64.json";
+export const OSS_BOOTSTRAP_LOCK_KEY = "bootstrap/windows-x64.commit.lock";
 export const ROLLBACK_SNAPSHOT_NAME = "bootstrap-rollback-snapshot.json";
 
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -69,20 +70,18 @@ async function getObject(fetchImpl, baseURL, key) {
   return record?.bytes ?? null;
 }
 
-async function putObject(fetchImpl, config, key, bytes, immutable, conditions = {}) {
+async function putObject(fetchImpl, config, key, bytes, immutable) {
   const date = new Date().toUTCString(); const base = new URL(config.baseURL); const type = contentType(key);
   const headers = { "Content-Type": type, Date: date, Authorization: ossAuthorization({ method: "PUT", contentType: type, date, key, secret: config.accessKeySecret, accessKeyId: config.accessKeyId, immutable, basePath: base.pathname.replace(/\/$/, ""), bucket: config.bucket }) };
   if (immutable) headers["x-oss-forbid-overwrite"] = "true";
-  if (conditions.ifMatch) headers["If-Match"] = conditions.ifMatch;
-  if (conditions.ifNoneMatch) headers["If-None-Match"] = "*";
   const response = await fetchImpl(`${config.baseURL}/${key}`, { method: "PUT", headers, body: bytes, redirect: "error" });
   if (!(response.ok || (immutable && response.status === 409))) throw new Error(`OSS PUT ${key} returned HTTP ${response.status}`);
+  return response.ok;
 }
 
-async function deleteObject(fetchImpl, config, key, conditions = {}) {
+async function deleteObject(fetchImpl, config, key) {
   const date = new Date().toUTCString(); const base = new URL(config.baseURL);
   const headers = { Date: date, Authorization: ossAuthorization({ method: "DELETE", date, key, secret: config.accessKeySecret, accessKeyId: config.accessKeyId, basePath: base.pathname.replace(/\/$/, ""), bucket: config.bucket }) };
-  if (conditions.ifMatch) headers["If-Match"] = conditions.ifMatch;
   const response = await fetchImpl(`${config.baseURL}/${key}`, { method: "DELETE", headers, redirect: "error" });
   if (!(response.ok || response.status === 204 || response.status === 404)) throw new Error(`OSS DELETE ${key} returned HTTP ${response.status}`);
 }
@@ -239,6 +238,17 @@ function assertCurrentMatchesSnapshot(current, snapshotRecord) {
   if (!current || !current.bytes.equals(snapshotRecord.previousBytes) || current.etag !== snapshotRecord.snapshot.previous.etag) throw new Error("current Bootstrap 已在 snapshot 后变化");
 }
 
+async function withBootstrapLock(fetchImpl, config, callback) {
+  const lockBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, operation: "bootstrap-mutation", owner: randomUUID(), acquiredAt: new Date().toISOString() }) + "\n");
+  const acquired = await putObject(fetchImpl, config, OSS_BOOTSTRAP_LOCK_KEY, lockBytes, true);
+  if (!acquired) throw new Error("Bootstrap mutation lock is already held");
+  try {
+    return await callback();
+  } finally {
+    await deleteObject(fetchImpl, config, OSS_BOOTSTRAP_LOCK_KEY);
+  }
+}
+
 export async function preflightPublisher({ accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET, probeId = randomUUID() }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const key = `probes/tauri-codex-${probeId}.txt`; const bytes = Buffer.from(`tauri-codex OSS probe ${probeId}\n`);
   await putObject(fetchImpl, config, key, bytes, true);
@@ -286,26 +296,26 @@ export async function commitRelease({ releaseRoot, snapshotPath, expectedSourceC
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   for (const item of release.immutable) await verifyObject(fetchImpl, config, item.artifact, item.role);
   const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
-  const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
-  assertCurrentMatchesSnapshot(current, snapshot);
-  const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
-  const nextPayload = selfUsePayload(nextEnvelope, "next Bootstrap");
-  if (current) {
-    const currentPayload = previousBootstrapPayload(current.bytes);
-    const currentVersion = currentPayload?.release?.version;
-    const nextVersion = nextPayload?.release?.version;
-    const currentInstallerVersion = currentPayload?.installer?.version;
-    const nextInstallerVersion = nextPayload?.installer?.version;
-    if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) < 0) throw new Error(`refusing Bootstrap downgrade ${currentVersion} -> ${nextVersion}`);
-    if (currentInstallerVersion && nextInstallerVersion && stableVersion.test(currentInstallerVersion) && stableVersion.test(nextInstallerVersion) && compareVersions(nextInstallerVersion, currentInstallerVersion) < 0) throw new Error(`refusing Installer downgrade ${currentInstallerVersion} -> ${nextInstallerVersion}`);
-    if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) === 0 && !current.bytes.equals(release.bootstrapBytes)) throw new Error(`refusing same-version Bootstrap replacement ${nextVersion}`);
-    if (current.bytes.equals(release.bootstrapBytes)) return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY, idempotent: true };
-    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifMatch: snapshot.snapshot.previous.etag });
-  } else {
-    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false, { ifNoneMatch: true });
-  }
-  const confirmed = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY); if (!confirmed?.equals(release.bootstrapBytes)) throw new Error("OSS Bootstrap commit readback mismatch");
-  return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
+  return withBootstrapLock(fetchImpl, config, async () => {
+    const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+    assertCurrentMatchesSnapshot(current, snapshot);
+    const nextEnvelope = JSON.parse(release.bootstrapBytes.toString("utf8"));
+    const nextPayload = selfUsePayload(nextEnvelope, "next Bootstrap");
+    if (current) {
+      const currentPayload = previousBootstrapPayload(current.bytes);
+      const currentVersion = currentPayload?.release?.version;
+      const nextVersion = nextPayload?.release?.version;
+      const currentInstallerVersion = currentPayload?.installer?.version;
+      const nextInstallerVersion = nextPayload?.installer?.version;
+      if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) < 0) throw new Error(`refusing Bootstrap downgrade ${currentVersion} -> ${nextVersion}`);
+      if (currentInstallerVersion && nextInstallerVersion && stableVersion.test(currentInstallerVersion) && stableVersion.test(nextInstallerVersion) && compareVersions(nextInstallerVersion, currentInstallerVersion) < 0) throw new Error(`refusing Installer downgrade ${currentInstallerVersion} -> ${nextInstallerVersion}`);
+      if (stableVersion.test(currentVersion) && stableVersion.test(nextVersion) && compareVersions(nextVersion, currentVersion) === 0 && !current.bytes.equals(release.bootstrapBytes)) throw new Error(`refusing same-version Bootstrap replacement ${nextVersion}`);
+      if (current.bytes.equals(release.bootstrapBytes)) return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY, idempotent: true };
+    }
+    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, release.bootstrapBytes, false);
+    const confirmed = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY); if (!confirmed?.equals(release.bootstrapBytes)) throw new Error("OSS Bootstrap commit readback mismatch");
+    return { committed: true, release: release.candidate.version, bootstrap: OSS_BOOTSTRAP_KEY };
+  });
 }
 
 export async function confirmRelease({ releaseRoot, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
@@ -319,16 +329,18 @@ export async function confirmRelease({ releaseRoot, expectedSourceCommit, access
 export async function rollbackRelease({ releaseRoot, snapshotPath, expectedSourceCommit, accessKeyId, accessKeySecret, fetchImpl = fetch, baseURL = OSS_BASE_URL, bucket = OSS_BUCKET }) {
   const config = settings({ accessKeyId, accessKeySecret, baseURL, bucket }); const release = loadCandidate(releaseRoot, expectedSourceCommit);
   const snapshot = loadRollbackSnapshot(releaseRoot, snapshotPath, release);
-  const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
-  if (!current?.bytes.equals(release.bootstrapBytes) || !validEtag(current.etag)) throw new Error("rollback 拒绝覆盖非本候选 Bootstrap");
-  if (snapshot.previousBytes) {
-    await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, snapshot.previousBytes, false, { ifMatch: current.etag });
-  } else {
-    await deleteObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, { ifMatch: current.etag });
-  }
-  const restored = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
-  if (snapshot.previousBytes ? !restored?.equals(snapshot.previousBytes) : restored !== null) throw new Error("OSS Bootstrap rollback readback mismatch");
-  return { rolledBack: true, release: release.candidate.version, restored: snapshot.previousBytes ? snapshot.snapshot.previous.sha256 : null };
+  return withBootstrapLock(fetchImpl, config, async () => {
+    const current = await getObjectRecord(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+    if (!current?.bytes.equals(release.bootstrapBytes)) throw new Error("rollback 拒绝覆盖非本候选 Bootstrap");
+    if (snapshot.previousBytes) {
+      await putObject(fetchImpl, config, OSS_BOOTSTRAP_KEY, snapshot.previousBytes, false);
+    } else {
+      await deleteObject(fetchImpl, config, OSS_BOOTSTRAP_KEY);
+    }
+    const restored = await getObject(fetchImpl, baseURL, OSS_BOOTSTRAP_KEY);
+    if (snapshot.previousBytes ? !restored?.equals(snapshot.previousBytes) : restored !== null) throw new Error("OSS Bootstrap rollback readback mismatch");
+    return { rolledBack: true, release: release.candidate.version, restored: snapshot.previousBytes ? snapshot.snapshot.previous.sha256 : null };
+  });
 }
 
 export async function publishRelease(options) { await stageRelease(options); await snapshotRelease(options); return commitRelease(options); }
@@ -337,7 +349,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   const [mode, version] = process.argv.slice(2); const appVersion = JSON.parse(readFileSync(path.join(workspaceRoot, "app", "package.json"), "utf8")).version;
   try {
     if (!stableVersion.test(version) || version !== appVersion) throw new Error("version must match app/package.json");
-    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : frozenSourceCommit(), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET };
+    const common = { releaseRoot: path.join(workspaceRoot, ".codex-build", "releases", version, "windows-x64"), expectedSourceCommit: mode === "preflight" ? undefined : (process.env.TAURI_CANDIDATE_SOURCE_COMMIT ?? frozenSourceCommit()), accessKeyId: process.env.ALIYUN_OSS_ACCESS_KEY_ID, accessKeySecret: process.env.ALIYUN_OSS_ACCESS_KEY_SECRET };
     const result = mode === "preflight" ? await preflightPublisher(common) : mode === "stage" ? await stageRelease(common) : mode === "snapshot" ? await snapshotRelease(common) : mode === "commit" ? await commitRelease(common) : mode === "confirm" ? await confirmRelease(common) : mode === "rollback" ? await rollbackRelease(common) : null;
     if (!result) throw new Error("usage: publish:release:oss -- <preflight|stage|snapshot|commit|confirm|rollback> <version>");
     console.log(JSON.stringify(result, null, 2));
