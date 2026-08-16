@@ -139,7 +139,7 @@ jobs:
         run: npm run build:release
 
       - name: Upload frozen candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64/*
@@ -210,7 +210,7 @@ jobs:
         run: npm run publish:release:oss -- snapshot ${{ needs.resolve.outputs.version }}
 
       - name: Upload rollback snapshot
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64/bootstrap-rollback-snapshot.json
