@@ -44,7 +44,7 @@ jobs:
       installer-version: ${{ steps.release.outputs.installer-version }}
       source-commit: ${{ steps.release.outputs.source-commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_commit }}
           fetch-depth: 0
@@ -95,7 +95,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve.outputs.source-commit }}
           fetch-depth: 0
@@ -154,7 +154,7 @@ jobs:
     timeout-minutes: 10
     environment: oss-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -177,7 +177,7 @@ jobs:
     timeout-minutes: 20
     environment: oss-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -225,7 +225,7 @@ jobs:
     timeout-minutes: 20
     environment: oss-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -267,7 +267,7 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
@@ -311,7 +311,7 @@ jobs:
     timeout-minutes: 15
     environment: oss-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
 
