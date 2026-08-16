@@ -292,7 +292,7 @@ jobs:
         run: npm run publish:release:oss -- confirm ${{ needs.resolve.outputs.version }}
 
       - name: Create OSS-only GitHub Release Notes
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.resolve.outputs.version }}
           target_commitish: ${{ needs.resolve.outputs.source-commit }}
