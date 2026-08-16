@@ -178,7 +178,7 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
@@ -226,7 +226,7 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
@@ -234,7 +234,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
@@ -268,7 +268,7 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
@@ -312,7 +312,7 @@ jobs:
         with:
           node-version: 24.19.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_candidate
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
@@ -320,7 +320,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: tauri-codex_${{ needs.resolve.outputs.version }}_windows-x64_rollback_snapshot
           path: .codex-build/releases/${{ needs.resolve.outputs.version }}/windows-x64
