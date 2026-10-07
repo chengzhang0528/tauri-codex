@@ -1,13 +1,13 @@
 ---
 name: align-solution-direction
-description: Use before producing or materially revising any solution, architecture proposal, implementation/refactor/integration/migration plan, rollout plan, or reviewer decision in this workspace. Establish a domain-independent direction contract from the latest user intent, verified facts, and prior corrections; separate outcome, boundary, invariants, completion rules, evidence, and lifecycle state; then pass silently, correct the framing, or stop only for a material decision before downstream skills add concrete detail.
+description: Use before producing or materially revising any solution, architecture proposal, implementation/refactor/integration/migration plan, rollout plan, or reviewer decision in this workspace. Establish a domain-independent direction contract from the latest user intent, verified facts, and prior corrections; independently check user and agent premises, missing variables, costs, and reasoning bias; separate outcome, boundary, invariants, completion rules, evidence, and lifecycle state; then pass silently, correct the framing, or stop only for a material decision before downstream skills add concrete detail.
 ---
 
 # Align Solution Direction
 
 ## Goal
 
-Establish the decision frame that every downstream solution must preserve. Align what outcome is being pursued, what belongs in scope, which rules must remain true, what counts as complete, and which choices are genuinely unresolved.
+Establish the decision frame that every downstream solution must preserve. Align the outcome, scope, invariants, completion rule, and unresolved choices. Judge user and agent claims by their evidence, regardless of who proposed them. Agree when supported and explain disagreement when warranted; do not manufacture objections to appear independent.
 
 Do not solve the concrete problem here. Do not produce an architecture inventory, layer checklist, file plan, test campaign, or document lifecycle. Route those details to the appropriate downstream skill after the direction is stable.
 
@@ -15,10 +15,11 @@ If current intent and facts already agree, pass silently. Use `../technical-solu
 
 ## Establish Authority
 
-1. Treat the latest explicit user instruction or correction as the desired direction. It supersedes incompatible earlier framing.
+1. Treat the latest explicit user instruction or correction as the desired direction. It supersedes incompatible earlier framing, but does not establish the truth of factual or causal claims embedded in the request. Preserve the user's goals and valid preferences while verifying those claims.
 2. Treat source, types, tests, measured behavior, and the routed formal owner as evidence about the current state and feasibility, not as authority over the user's desired outcome.
 3. Treat conversation history as evidence of decisions and corrections, never as product or code truth. Preserve settled choices unless the user supersedes them or verified facts make them impossible.
-4. Verify facts that can be discovered. Ask only when alternatives materially change the outcome or ownership and cannot be resolved from current authority.
+4. Before a consequential decision, check user and agent premises for factual errors, logical leaps, and missing information that could change the decision. Verify discoverable facts before asking the user. Ask only when alternatives materially change the outcome or ownership and cannot be resolved from current authority.
+5. For consequential claims about data, people, versions, or conclusions, use traceable sources appropriate to the claim. Check freshness and scope; prefer source, types, and tests for code facts and authoritative primary sources for external facts. Distinguish observations, estimates, and inferences. Mark unresolved facts as uncertain rather than treating them as true or false.
 
 Read root `AGENTS.md`, `文档/TASK_CONTROL.md`, the matched project `AGENTS.md`, and only sources needed to resolve a direction-changing fact. Read `WORK_CANDIDATES.md` under `文档/` only when the user asks about later, remaining, next, or roadmap work. Follow `WORKFLOW_CONTRACT.md` only for workspace changes or cross-session recovery.
 
@@ -49,7 +50,7 @@ Preserve this provenance across every revision and handoff. Do not turn a workin
 
 ## Learn From Corrections
 
-When the user corrects an answer or repeatedly rejects the same framing:
+When the user corrects an answer or new evidence contradicts a premise or conclusion:
 
 1. Identify the incorrect assumption or conflation that produced the error, not just the sentence that was rejected.
 2. Determine the correction's proper generality: one case, one class of work, one project, or workspace-wide. Do not turn a concrete example into a universal rule without evidence that the user intends that scope.
@@ -61,6 +62,8 @@ When the user corrects an answer or repeatedly rejects the same framing:
 Corrections may change the direction contract even when no product or code fact changes. They must not be buried as implementation notes.
 
 ## Calibrate the Direction
+
+Actively identify omitted variables, consumers, dependencies, and implementation, maintenance, or operating costs that could change the decision. Consider relevant counterevidence and plausible alternatives. Check for anchoring, selective evidence, sunk-cost reasoning, or unjustified generalization when the argument supplies concrete evidence. Explain the reasoning error without attributing a psychological trait to the user.
 
 Test the proposed direction with these questions:
 
@@ -84,10 +87,12 @@ Choose the fastest verification that covers the retained risk. Preserve a broade
 Choose one outcome:
 
 - **Silent pass**: the direction contract matches current intent and evidence. Do not expose this skill or restate the contract; continue directly to the requested work.
-- **Correct and continue**: the framing, scope, ownership, completion rule, or task execution type was wrong, but no material user decision remains. State only the changed decisions and continue from the corrected contract.
+- **Correct and continue**: a factual premise, inference, framing, scope, ownership, completion rule, or task execution type was wrong, but no material user decision remains. Identify the error directly, cite the relevant evidence, explain its concrete consequence, and offer a correction within the authorized outcome before continuing.
 - **Stop for decision**: unresolved alternatives materially change the outcome, invariants, ownership, persisted/public commitments, or completion rule. Present two or three exclusive options, recommend one, and state the consequence.
 
 Do not stop for discoverable facts, non-material assumptions, implementation preferences, later verification, or repository state. Do not repeat concrete impact matrices, file plans, or verification commands owned by downstream skills.
+
+Scope correctness, feasibility, risk severity, and completion claims to the available evidence, assumptions, and conditions. Separate observations from forecasts. Do not turn a sample into an exhaustive conclusion or a hypothetical risk into an observed incident.
 
 ## Hand Off Without Drift
 
