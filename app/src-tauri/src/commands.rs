@@ -231,8 +231,7 @@ fn sync_server_profile_files(app: &AppHandle, servers: &[ServerProfile]) -> Resu
 
 #[tauri::command]
 pub fn save_config(app: AppHandle, config_toml: String) -> Result<CodexSettings, String> {
-    config_toml
-        .parse::<toml::Value>()
+    toml::from_str::<toml::Value>(&config_toml)
         .map_err(|error| format!("TOML 校验失败：{error}"))?;
     let updated = ensure_default_codex_settings(&config_toml)?;
     let updated = remove_legacy_server_profiles(&updated)?;
@@ -291,9 +290,7 @@ fn remove_legacy_server_profiles(config_toml: &str) -> Result<String, String> {
     }
 
     let updated = document.to_string();
-    updated
-        .parse::<toml::Value>()
-        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    toml::from_str::<toml::Value>(&updated).map_err(|error| format!("TOML 校验失败：{error}"))?;
     Ok(updated)
 }
 
@@ -324,14 +321,12 @@ fn build_server_profile(server: &ServerProfile) -> Result<String, String> {
     provider.insert("wire_api", toml_edit::value("responses"));
 
     let profile = document.to_string();
-    profile
-        .parse::<toml::Value>()
-        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    toml::from_str::<toml::Value>(&profile).map_err(|error| format!("TOML 校验失败：{error}"))?;
     Ok(profile)
 }
 
 fn parse_codex_settings(config_toml: &str) -> CodexSettings {
-    let value = match config_toml.parse::<toml::Value>() {
+    let value = match toml::from_str::<toml::Value>(&config_toml) {
         Ok(value) => value,
         Err(error) => {
             return CodexSettings {
@@ -388,9 +383,7 @@ fn ensure_default_codex_settings(config_toml: &str) -> Result<String, String> {
         );
     }
     let updated = document.to_string();
-    updated
-        .parse::<toml::Value>()
-        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    toml::from_str::<toml::Value>(&updated).map_err(|error| format!("TOML 校验失败：{error}"))?;
     Ok(updated)
 }
 
@@ -455,9 +448,7 @@ fn merge_codex_settings(
         _ => return Err("执行方式不是支持的 Codex 配置".to_string()),
     }
     let updated = document.to_string();
-    updated
-        .parse::<toml::Value>()
-        .map_err(|error| format!("TOML 校验失败：{error}"))?;
+    toml::from_str::<toml::Value>(&updated).map_err(|error| format!("TOML 校验失败：{error}"))?;
     Ok(updated)
 }
 
@@ -829,7 +820,7 @@ mod tests {
             is_default: false,
         })
         .expect("build profile");
-        let value = profile.parse::<toml::Value>().expect("valid TOML");
+        let value = toml::from_str::<toml::Value>(&profile).expect("valid TOML");
 
         assert_eq!(value["model_provider"].as_str(), Some("server-api-one"));
         assert_eq!(
@@ -849,7 +840,7 @@ mod tests {
             "# Keep this comment\n[model_providers.user-provider]\nname = \"User\"\nbase_url = \"https://user.example/v1\"\n\n[model_providers.server-old]\nname = \"Old\"\nbase_url = \"https://old.example/v1\"\n\n[profiles.server-old]\nmodel_provider = \"server-old\"\n",
         )
         .expect("remove legacy provider");
-        let value = updated.parse::<toml::Value>().expect("valid TOML");
+        let value = toml::from_str::<toml::Value>(&updated).expect("valid TOML");
 
         assert!(updated.contains("# Keep this comment"));
         assert!(value["model_providers"].get("server-old").is_none());
@@ -885,7 +876,7 @@ personality = "pragmatic"
     #[test]
     fn new_config_contains_the_product_auto_compact_default() {
         let config = default_config_toml();
-        let value = config.parse::<toml::Value>().expect("valid TOML");
+        let value = toml::from_str::<toml::Value>(&config).expect("valid TOML");
 
         assert_eq!(
             value["model_auto_compact_token_limit"].as_integer(),
@@ -898,7 +889,7 @@ personality = "pragmatic"
         let original =
             "# Keep this comment\nmodel = \"user-model\"\n\n[features]\nmulti_agent = true\n";
         let updated = ensure_default_codex_settings(original).expect("add default setting");
-        let value = updated.parse::<toml::Value>().expect("valid TOML");
+        let value = toml::from_str::<toml::Value>(&updated).expect("valid TOML");
 
         assert!(updated.contains("# Keep this comment"));
         assert_eq!(value["model"].as_str(), Some("user-model"));
@@ -929,7 +920,7 @@ multi_agent = true
             },
         )
         .expect("merge guided settings");
-        let value = updated.parse::<toml::Value>().expect("valid TOML");
+        let value = toml::from_str::<toml::Value>(&updated).expect("valid TOML");
 
         assert!(updated.contains("# Keep this comment"));
         assert_eq!(value["model"].as_str(), Some("new-model"));

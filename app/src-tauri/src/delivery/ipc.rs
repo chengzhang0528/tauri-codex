@@ -149,10 +149,7 @@ fn serve_windows(
             )
         };
         if handle.is_invalid() {
-            let error = format!(
-                "创建 Named Pipe 失败：{}",
-                windows::core::Error::from_win32()
-            );
+            let error = format!("创建 Named Pipe 失败：{}", std::io::Error::last_os_error());
             if let Some(sender) = ready.take() {
                 let _ = sender.send(Err(error.clone()));
             }

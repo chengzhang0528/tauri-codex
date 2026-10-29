@@ -1,4 +1,4 @@
-use super::contract::{artifact_url, Artifact, Component, ComponentId, Manifest};
+use super::contract::{artifact_url, digest_hex, Artifact, Component, ComponentId, Manifest};
 use super::health;
 use crate::job;
 use reqwest::blocking::Client;
@@ -209,7 +209,7 @@ fn download(
             hasher.update(&buffer[..read]);
             progress("正在下载组件", label, size, artifact.size);
         }
-        if size != artifact.size || format!("{:x}", hasher.finalize()) != artifact.sha256 {
+        if size != artifact.size || digest_hex(hasher.finalize().as_ref()) != artifact.sha256 {
             return Err(format!("{label} size/SHA-256 不匹配"));
         }
         file.sync_all().map_err(|error| error.to_string())?;
@@ -238,6 +238,8 @@ fn unpack_zip(
     for index in 0..archive.len() {
         ensure_not_cancelled(cancelled)?;
         let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        // Check the original archive name before a ZIP implementation can normalize it.
+        validate_archive_path(Path::new(entry.name()))?;
         let relative = entry
             .enclosed_name()
             .ok_or_else(|| "组件归档包含不安全路径".to_string())?
@@ -361,7 +363,7 @@ fn installed_tree_sha256(root: &Path) -> Result<String, String> {
         tree.update(sha256_file(&path)?.as_bytes());
         tree.update(b"\n");
     }
-    Ok(format!("{:x}", tree.finalize()))
+    Ok(digest_hex(tree.finalize().as_ref()))
 }
 
 fn collect_tree_files(
@@ -427,7 +429,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(digest_hex(hasher.finalize().as_ref()))
 }
 
 fn ensure_not_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), String> {
@@ -526,10 +528,25 @@ mod tests {
         let file = fs::File::create(&archive).unwrap();
         let mut writer = zip::ZipWriter::new(file);
         writer
-            .start_file("./package.json", SimpleFileOptions::default())
+            .start_file("xxpackage.json", SimpleFileOptions::default())
             .unwrap();
         writer.write_all(b"{}").unwrap();
         writer.finish().unwrap();
+        // Construct an archive with the exact unsafe name even if a newer ZIP writer
+        // normalizes paths before writing them. Names appear in both ZIP headers.
+        let mut bytes = fs::read(&archive).unwrap();
+        let old_name = b"xxpackage.json";
+        let unsafe_name = b"./package.json";
+        let offsets: Vec<_> = bytes
+            .windows(old_name.len())
+            .enumerate()
+            .filter_map(|(offset, window)| (window == old_name).then_some(offset))
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        for offset in offsets {
+            bytes[offset..offset + old_name.len()].copy_from_slice(unsafe_name);
+        }
+        fs::write(&archive, bytes).unwrap();
         assert!(super::verify_component_archive(&archive).is_err());
 
         let valid_archive = root.join("valid.zip");

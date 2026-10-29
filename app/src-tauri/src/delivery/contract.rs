@@ -432,8 +432,18 @@ pub fn newer(candidate: &str, current: &str) -> Result<bool, String> {
     )
 }
 
+pub(super) fn digest_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    result
+}
+
 pub fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    digest_hex(Sha256::digest(bytes).as_ref())
 }
 
 #[cfg(test)]
@@ -445,6 +455,19 @@ mod tests {
         UPSTREAM_AUTHENTICODE_PROVENANCE,
     };
     use serde_json::json;
+
+    #[test]
+    fn sha256_uses_lowercase_hex_with_leading_zeroes() {
+        assert_eq!(
+            super::digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            super::digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(super::digest_hex(&[0, 1, 15, 16, 255]), "00010f10ff");
+    }
 
     #[test]
     fn object_url_is_fixed_to_oss() {
